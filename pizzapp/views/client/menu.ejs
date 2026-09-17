@@ -1,0 +1,182 @@
+<%- include('../partials/head', { title: restaurant.name + ' - Cardápio' }) %>
+
+<header class="topbar">
+  <h1><%= restaurant.name %></h1>
+  <span>📱 <%= restaurant.whatsapp %></span>
+</header>
+
+<main>
+  <div class="grid">
+    <section>
+      <div class="card">
+        <h2>Cardápio</h2>
+        <% if (products.length === 0) { %>
+          <p class="empty">Nenhum produto disponível no momento.</p>
+        <% } else { %>
+          <% products.forEach(function(p) { %>
+            <div class="product">
+              <div class="product-info">
+                <h3><%= p.name %></h3>
+                <p><%= p.description || '' %></p>
+              </div>
+              <div style="display:flex; align-items:center;">
+                <span class="product-price">R$ <%= Number(p.price).toFixed(2) %></span>
+                <button onclick="addToCart(<%= p.id %>, '<%= p.name.replace(/'/g, "\\'") %>', <%= p.price %>)">Adicionar</button>
+              </div>
+            </div>
+          <% }); %>
+        <% } %>
+      </div>
+    </section>
+
+    <aside>
+      <div class="card">
+        <h2>Seu Pedido</h2>
+        <div id="cart-items">
+          <p class="empty" id="cart-empty">Carrinho vazio</p>
+        </div>
+        <div class="cart-total">
+          <span>Total</span>
+          <span id="cart-total">R$ 0.00</span>
+        </div>
+      </div>
+
+      <div class="card" id="checkout-card" style="display:none;">
+        <h2>Finalizar Pedido</h2>
+        <form id="checkout-form">
+          <label>Nome</label>
+          <input type="text" id="customer_name" required>
+
+          <label>Telefone</label>
+          <input type="text" id="customer_phone" required>
+
+          <label>Endereço de entrega</label>
+          <textarea id="delivery_address" rows="2" required></textarea>
+
+          <label>Forma de pagamento</label>
+          <select id="payment_method">
+            <option value="dinheiro">Dinheiro</option>
+            <option value="cartao">Cartão</option>
+            <option value="pix">Pix</option>
+          </select>
+
+          <div id="order-error" class="msg-error"></div>
+          <button type="submit" style="width:100%;">Confirmar Pedido</button>
+        </form>
+      </div>
+
+      <div class="card" id="success-card" style="display:none;">
+        <h2>Pedido realizado! 🎉</h2>
+        <p id="success-message" class="msg-success"></p>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const SLUG = '<%= restaurant.slug %>';
+  const cart = new Map();
+
+  function fmt(v) { return 'R$ ' + Number(v).toFixed(2); }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  function addToCart(id, name, price) {
+    const item = cart.get(id) || { id, name, price, quantity: 0 };
+    item.quantity += 1;
+    cart.set(id, item);
+    renderCart();
+    showToast(name + ' adicionado');
+  }
+
+  function removeFromCart(id) {
+    cart.delete(id);
+    renderCart();
+  }
+
+  function changeQty(id, delta) {
+    const item = cart.get(id);
+    if (!item) return;
+    item.quantity += delta;
+    if (item.quantity <= 0) cart.delete(id);
+    renderCart();
+  }
+
+  function renderCart() {
+    const container = document.getElementById('cart-items');
+    const emptyMsg = document.getElementById('cart-empty');
+    const checkoutCard = document.getElementById('checkout-card');
+    container.innerHTML = '';
+
+    if (cart.size === 0) {
+      container.appendChild(emptyMsg);
+      checkoutCard.style.display = 'none';
+    } else {
+      checkoutCard.style.display = 'block';
+      cart.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'cart-item';
+        div.innerHTML = `
+          <span>${item.quantity}x ${item.name}</span>
+          <span>
+            ${fmt(item.price * item.quantity)}
+            <button class="small secondary" onclick="changeQty(${item.id}, -1)">-</button>
+            <button class="small secondary" onclick="changeQty(${item.id}, 1)">+</button>
+            <button class="small danger" onclick="removeFromCart(${item.id})">x</button>
+          </span>`;
+        container.appendChild(div);
+      });
+    }
+
+    const total = Array.from(cart.values()).reduce((sum, i) => sum + i.price * i.quantity, 0);
+    document.getElementById('cart-total').textContent = fmt(total);
+  }
+
+  document.getElementById('checkout-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('order-error');
+    errorEl.textContent = '';
+
+    const payload = {
+      customer_name: document.getElementById('customer_name').value,
+      customer_phone: document.getElementById('customer_phone').value,
+      delivery_address: document.getElementById('delivery_address').value,
+      payment_method: document.getElementById('payment_method').value,
+      items: Array.from(cart.values()).map(i => ({ product_id: i.id, quantity: i.quantity }))
+    };
+
+    try {
+      const res = await fetch(`/api/orders/${SLUG}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        errorEl.textContent = data.error || 'Erro ao enviar pedido.';
+        return;
+      }
+
+      document.getElementById('checkout-card').style.display = 'none';
+      document.getElementById('success-card').style.display = 'block';
+      document.getElementById('success-message').textContent =
+        `Pedido #${data.order_id} confirmado. Total: ${fmt(data.total_amount)}. Acompanhe pelo WhatsApp da loja.`;
+      cart.clear();
+      renderCart();
+    } catch (err) {
+      errorEl.textContent = 'Erro de conexão. Tente novamente.';
+    }
+  });
+
+  renderCart();
+</script>
+</body>
+</html>

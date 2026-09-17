@@ -1,0 +1,154 @@
+<%- include('../partials/head', { title: restaurant.name + ' - Produtos' }) %>
+
+<header class="topbar">
+  <h1>Painel · <%= restaurant.name %></h1>
+  <a href="/<%= restaurant.slug %>" target="_blank">Ver cardápio ↗</a>
+</header>
+
+<main>
+  <div class="toolbar">
+    <nav>
+      <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
+      <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
+    </nav>
+  </div>
+
+  <div class="grid">
+    <section>
+      <div class="card">
+        <h2>Produtos</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Nome</th>
+              <th>Preço</th>
+              <th>Disponível</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="products-body">
+            <tr><td colspan="4" class="empty">Carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <aside>
+      <div class="card">
+        <h2>Novo Produto</h2>
+        <form id="product-form">
+          <label>Nome</label>
+          <input type="text" id="p_name" required>
+
+          <label>Descrição</label>
+          <textarea id="p_description" rows="2"></textarea>
+
+          <label>Preço (R$)</label>
+          <input type="number" id="p_price" step="0.01" min="0" required>
+
+          <div id="product-error" class="msg-error"></div>
+          <button type="submit" style="width:100%;">Adicionar produto</button>
+        </form>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const SLUG = '<%= restaurant.slug %>';
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  function fmt(v) { return 'R$ ' + Number(v).toFixed(2); }
+
+  async function loadProducts() {
+    const res = await fetch(`/api/products/${SLUG}`);
+    const data = await res.json();
+    const body = document.getElementById('products-body');
+    body.innerHTML = '';
+
+    if (!data.products || data.products.length === 0) {
+      body.innerHTML = '<tr><td colspan="4" class="empty">Nenhum produto cadastrado.</td></tr>';
+      return;
+    }
+
+    data.products.forEach(p => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${p.name}<br><small>${p.description || ''}</small></td>
+        <td>${fmt(p.price)}</td>
+        <td>
+          <button class="small ${p.is_available ? '' : 'secondary'}" onclick="toggleAvailability(${p.id}, ${!p.is_available})">
+            ${p.is_available ? 'Disponível' : 'Indisponível'}
+          </button>
+        </td>
+        <td>
+          <button class="small danger" onclick="removeProduct(${p.id})">Excluir</button>
+        </td>
+      `;
+      body.appendChild(tr);
+    });
+  }
+
+  async function toggleAvailability(id, newValue) {
+    await fetch(`/api/products/${SLUG}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_available: newValue })
+    });
+    loadProducts();
+  }
+
+  async function removeProduct(id) {
+    if (!confirm('Excluir este produto?')) return;
+    const res = await fetch(`/api/products/${SLUG}/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.error || 'Erro ao excluir produto');
+      return;
+    }
+    showToast('Produto excluído');
+    loadProducts();
+  }
+
+  document.getElementById('product-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('product-error');
+    errorEl.textContent = '';
+
+    const payload = {
+      name: document.getElementById('p_name').value,
+      description: document.getElementById('p_description').value,
+      price: document.getElementById('p_price').value
+    };
+
+    try {
+      const res = await fetch(`/api/products/${SLUG}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        errorEl.textContent = data.error || 'Erro ao criar produto';
+        return;
+      }
+      showToast('Produto adicionado');
+      document.getElementById('product-form').reset();
+      loadProducts();
+    } catch (err) {
+      errorEl.textContent = 'Erro de conexão';
+    }
+  });
+
+  loadProducts();
+</script>
+</body>
+</html>

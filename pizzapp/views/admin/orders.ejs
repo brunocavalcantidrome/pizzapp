@@ -1,0 +1,126 @@
+<%- include('../partials/head', { title: restaurant.name + ' - Painel de Pedidos' }) %>
+
+<header class="topbar">
+  <h1>Painel · <%= restaurant.name %></h1>
+  <a href="/<%= restaurant.slug %>" target="_blank">Ver cardápio ↗</a>
+</header>
+
+<main>
+  <div class="toolbar">
+    <nav>
+      <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
+      <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
+    </nav>
+    <select id="status-filter" onchange="applyFilter()">
+      <option value="">Todos os status</option>
+      <option value="pending">Pendente</option>
+      <option value="preparing">Preparando</option>
+      <option value="shipped">Saiu para entrega</option>
+      <option value="delivered">Entregue</option>
+      <option value="cancelled">Cancelado</option>
+    </select>
+  </div>
+
+  <div class="card">
+    <table id="orders-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Cliente</th>
+          <th>Itens</th>
+          <th>Total</th>
+          <th>Status</th>
+          <th>Criado em</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="orders-body">
+        <tr><td colspan="7" class="empty">Carregando...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const SLUG = '<%= restaurant.slug %>';
+  const STATUSES = ['pending', 'preparing', 'shipped', 'delivered', 'cancelled'];
+  const STATUS_LABELS = {
+    pending: 'Pendente',
+    preparing: 'Preparando',
+    shipped: 'Saiu para entrega',
+    delivered: 'Entregue',
+    cancelled: 'Cancelado'
+  };
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  function fmt(v) { return 'R$ ' + Number(v).toFixed(2); }
+
+  async function loadOrders() {
+    const status = document.getElementById('status-filter').value;
+    const url = `/api/orders/${SLUG}` + (status ? `?status=${status}` : '');
+    const res = await fetch(url);
+    const data = await res.json();
+    const body = document.getElementById('orders-body');
+    body.innerHTML = '';
+
+    if (!data.orders || data.orders.length === 0) {
+      body.innerHTML = '<tr><td colspan="7" class="empty">Nenhum pedido encontrado.</td></tr>';
+      return;
+    }
+
+    data.orders.forEach(order => {
+      const itemsText = order.items.map(i => `${i.quantity}x ${i.product_name}`).join(', ');
+      const options = STATUSES.map(s =>
+        `<option value="${s}" ${s === order.status ? 'selected' : ''}>${STATUS_LABELS[s]}</option>`
+      ).join('');
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>#${order.id}</td>
+        <td>${order.customer_name}<br><small>${order.customer_phone}</small><br><small>${order.delivery_address}</small></td>
+        <td>${itemsText}</td>
+        <td>${fmt(order.total_amount)}<br><small>${order.payment_method}</small></td>
+        <td><span class="badge ${order.status}">${STATUS_LABELS[order.status] || order.status}</span></td>
+        <td>${new Date(order.created_at).toLocaleString('pt-BR')}</td>
+        <td>
+          <select onchange="updateStatus(${order.id}, this.value)">${options}</select>
+        </td>
+      `;
+      body.appendChild(tr);
+    });
+  }
+
+  async function updateStatus(orderId, status) {
+    try {
+      const res = await fetch(`/api/orders/${SLUG}/${orderId}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Erro ao atualizar status');
+        return;
+      }
+      showToast(`Pedido #${orderId} atualizado`);
+      loadOrders();
+    } catch (err) {
+      showToast('Erro de conexão');
+    }
+  }
+
+  function applyFilter() { loadOrders(); }
+
+  loadOrders();
+  setInterval(loadOrders, 15000);
+</script>
+</body>
+</html>

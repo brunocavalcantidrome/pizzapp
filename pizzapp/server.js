@@ -1,11 +1,35 @@
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const mysql = require('mysql2/promise');
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
 
 const PORT = process.env.PORT || 3000;
+
+// Middleware de autenticação básica para o painel do administrador
+function adminAuth(req, res, next) {
+  const user = process.env.ADMIN_USER;
+  const pass = process.env.ADMIN_PASSWORD;
+
+  const header = req.headers.authorization;
+  if (header) {
+    const [, encoded] = header.split(' ');
+    const [reqUser, reqPass] = Buffer.from(encoded || '', 'base64').toString().split(':');
+    if (reqUser === user && reqPass === pass) {
+      return next();
+    }
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="Painel Administrativo"');
+  return res.status(401).send('Autenticação necessária.');
+}
 
 // Configuração do Connection Pool
 const pool = mysql.createPool({
@@ -59,6 +83,123 @@ app.get('/api/menu/:slug', tenantMiddleware, async (req, res) => {
     console.error('Erro ao buscar produtos:', err);
     res.status(500).json({ error: 'Erro ao carregar cardápio.' });
   }
+});
+
+// Rota (admin) para listar todos os produtos, incluindo indisponíveis
+app.get('/api/products/:slug', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const [products] = await pool.query(
+      'SELECT id, name, description, price, is_available FROM products WHERE restaurant_id = ? ORDER BY name',
+      [req.restaurant.id]
+    );
+    res.json({ restaurant: req.restaurant.name, products });
+  } catch (err) {
+    console.error('Erro ao listar produtos:', err);
+    res.status(500).json({ error: 'Erro ao carregar produtos.' });
+  }
+});
+
+// Rota (admin) para criar um novo produto
+app.post('/api/products/:slug', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const { name, description, price } = req.body;
+
+    if (!name || price === undefined || price === null || isNaN(Number(price))) {
+      return res.status(400).json({ error: 'Nome e preço válido são obrigatórios.' });
+    }
+
+    const [result] = await pool.query(
+      'INSERT INTO products (restaurant_id, name, description, price, is_available) VALUES (?, ?, ?, ?, TRUE)',
+      [req.restaurant.id, name, description || null, Number(price)]
+    );
+
+    res.status(201).json({ message: 'Produto criado com sucesso!', product_id: result.insertId });
+  } catch (err) {
+    console.error('Erro ao criar produto:', err);
+    res.status(500).json({ error: 'Erro ao criar produto.' });
+  }
+});
+
+// Rota (admin) para atualizar um produto (nome, descrição, preço, disponibilidade)
+app.put('/api/products/:slug/:productId', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const { productId } = req.params;
+    const { name, description, price, is_available } = req.body;
+
+    const fields = [];
+    const values = [];
+
+    if (name !== undefined) { fields.push('name = ?'); values.push(name); }
+    if (description !== undefined) { fields.push('description = ?'); values.push(description); }
+    if (price !== undefined) { fields.push('price = ?'); values.push(Number(price)); }
+    if (is_available !== undefined) { fields.push('is_available = ?'); values.push(Boolean(is_available)); }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: 'Nenhum campo para atualizar foi informado.' });
+    }
+
+    values.push(productId, req.restaurant.id);
+
+    const [result] = await pool.query(
+      `UPDATE products SET ${fields.join(', ')} WHERE id = ? AND restaurant_id = ?`,
+      values
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Produto não encontrado neste estabelecimento.' });
+    }
+
+    res.json({ message: 'Produto atualizado com sucesso!' });
+  } catch (err) {
+    console.error('Erro ao atualizar produto:', err);
+    res.status(500).json({ error: 'Erro ao atualizar produto.' });
+  }
+});
+
+// Rota (admin) para excluir um produto
+app.delete('/api/products/:slug/:productId', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const { productId } = req.params;
+
+    const [result] = await pool.query(
+      'DELETE FROM products WHERE id = ? AND restaurant_id = ?',
+      [productId, req.restaurant.id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Produto não encontrado neste estabelecimento.' });
+    }
+
+    res.json({ message: 'Produto excluído com sucesso!' });
+  } catch (err) {
+    console.error('Erro ao excluir produto:', err);
+    res.status(500).json({ error: 'Erro ao excluir produto. Verifique se ele não está associado a pedidos existentes.' });
+  }
+});
+
+// Rota pública: página do cardápio para o cliente fazer pedidos
+app.get('/:slug', tenantMiddleware, async (req, res) => {
+  try {
+    const [products] = await pool.query(
+      'SELECT id, name, description, price FROM products WHERE restaurant_id = ? AND is_available = TRUE',
+      [req.restaurant.id]
+    );
+
+    res.render('client/menu', { restaurant: req.restaurant, products });
+  } catch (err) {
+    console.error('Erro ao renderizar cardápio:', err);
+    res.status(500).send('Erro ao carregar cardápio.');
+  }
+});
+
+// Rota do painel administrativo: pedidos
+app.get('/:slug/admin', adminAuth, tenantMiddleware, (req, res) => {
+  res.render('admin/orders', { restaurant: req.restaurant });
+});
+
+// Rota do painel administrativo: produtos
+app.get('/:slug/admin/produtos', adminAuth, tenantMiddleware, (req, res) => {
+  res.render('admin/products', { restaurant: req.restaurant });
 });
 
 // Teste de Saúde / Conexão
@@ -165,7 +306,7 @@ app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
 });
 
 // Rota para o painel do restaurante ver todos os pedidos
-app.get('/api/orders/:slug', tenantMiddleware, async (req, res) => {
+app.get('/api/orders/:slug', adminAuth, tenantMiddleware, async (req, res) => {
   try {
     const restaurantId = req.restaurant.id;
     const { status } = req.query;
@@ -247,7 +388,7 @@ app.get('/api/orders/:slug', tenantMiddleware, async (req, res) => {
 });
 
 // Rota para atualizar o status de um pedido
-app.put('/api/orders/:slug/:orderId/status', tenantMiddleware, async (req, res) => {
+app.put('/api/orders/:slug/:orderId/status', adminAuth, tenantMiddleware, async (req, res) => {
   try {
     const restaurantId = req.restaurant.id;
     const { orderId } = req.params;

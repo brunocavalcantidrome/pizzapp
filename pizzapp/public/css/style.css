@@ -1,0 +1,195 @@
+:root {
+  --primary: #d62828;
+  --primary-dark: #a91f1f;
+  --bg: #f7f3ee;
+  --card: #ffffff;
+  --text: #2b2b2b;
+  --muted: #767676;
+  --border: #e6e0d8;
+  --success: #2e8b57;
+  --warning: #d98c00;
+  --danger: #c0392b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header.topbar {
+  background: var(--primary);
+  color: #fff;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+header.topbar h1 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+header.topbar a {
+  color: #fff;
+  text-decoration: none;
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 24px;
+}
+
+@media (max-width: 800px) {
+  .grid { grid-template-columns: 1fr; }
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.product {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.product:last-child { border-bottom: none; }
+
+.product-info h3 { margin: 0 0 4px; font-size: 1rem; }
+.product-info p { margin: 0; color: var(--muted); font-size: 0.85rem; }
+.product-price { font-weight: bold; color: var(--primary); margin-right: 12px; }
+
+button, .btn {
+  cursor: pointer;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 0.9rem;
+  background: var(--primary);
+  color: #fff;
+  transition: background 0.15s;
+}
+
+button:hover, .btn:hover { background: var(--primary-dark); }
+button.secondary { background: var(--muted); }
+button.small { padding: 4px 10px; font-size: 0.8rem; }
+button.danger { background: var(--danger); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input, select, textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  margin-bottom: 10px;
+  font-family: inherit;
+}
+
+label { font-size: 0.85rem; color: var(--muted); display: block; margin-bottom: 4px; }
+
+.cart-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+}
+
+.cart-total {
+  display: flex;
+  justify-content: space-between;
+  font-weight: bold;
+  font-size: 1.1rem;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin-top: 10px;
+}
+
+.empty { color: var(--muted); text-align: center; padding: 24px 0; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+  vertical-align: top;
+}
+
+th { color: var(--muted); font-weight: 600; }
+
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+.badge.pending { background: var(--warning); }
+.badge.preparing { background: #2980b9; }
+.badge.shipped { background: #8e44ad; }
+.badge.delivered { background: var(--success); }
+.badge.cancelled { background: var(--danger); }
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.toolbar nav a {
+  margin-right: 16px;
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: var(--text);
+  color: #fff;
+  padding: 12px 18px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: all 0.2s;
+  pointer-events: none;
+}
+
+.toast.show { opacity: 1; transform: translateY(0); }
+
+.msg-error { color: var(--danger); font-size: 0.85rem; margin-top: -4px; margin-bottom: 10px; }
+.msg-success { color: var(--success); font-size: 0.9rem; }
