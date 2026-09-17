@@ -44,10 +44,8 @@ async function tenantMiddleware(req, res, next) {
 // Rota 1: Rota pública para buscar dados da loja e seu cardápio
 app.get('/api/menu/:slug', tenantMiddleware, async (req, res) => {
   try {
-    // req.restaurant veio do middleware
     const restaurantId = req.restaurant.id;
 
-    // Busca apenas os produtos PERTENCENTES a este restaurant_id
     const [products] = await pool.query(
       'SELECT id, name, description, price FROM products WHERE restaurant_id = ? AND is_available = TRUE',
       [restaurantId]
@@ -73,40 +71,43 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Rota POST para receber o pedido do carrinho
+// Rota POST para receber o pedido do carrinho (Otimizada e Segura)
 app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
-  // Pega uma conexão individual do Pool para executar a transação
+  const { customer_name, customer_phone, delivery_address, payment_method, items } = req.body;
+
+  // Validação inicial antes de solicitar conexão ao pool
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'O carrinho não pode estar vazio.' });
+  }
+
   const connection = await pool.getConnection();
 
   try {
     const restaurantId = req.restaurant.id;
-    const { customer_name, customer_phone, delivery_address, payment_method, items } = req.body;
-
-    // Validação simples
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      connection.release();
-      return res.status(400).json({ error: 'O carrinho não pode estar vazio.' });
-    }
 
     // 1. INICIA A TRANSAÇÃO
     await connection.beginTransaction();
 
-    // Calcula o valor total do pedido no backend para evitar fraudes do frontend
     let totalAmount = 0;
     const validatedItems = [];
 
-    for (const item of items) {
-      // Busca o produto e garante que ele PERTENCE ao estabelecimento correto
-      const [products] = await connection.query(
-        'SELECT id, price, is_available FROM products WHERE id = ? AND restaurant_id = ?',
-        [item.product_id, restaurantId]
-      );
+    // Busca todos os produtos do carrinho em uma única consulta (Evita consulta N+1)
+    const productIds = items.map(i => i.product_id);
+    const [products] = await connection.query(
+      'SELECT id, price, is_available FROM products WHERE id IN (?) AND restaurant_id = ?',
+      [productIds, restaurantId]
+    );
 
-      if (products.length === 0 || !products[0].is_available) {
+    // Mapeia os produtos para acesso O(1)
+    const productMap = new Map(products.map(p => [p.id, p]));
+
+    for (const item of items) {
+      const product = productMap.get(item.product_id);
+
+      if (!product || !product.is_available) {
         throw new Error(`Produto ID ${item.product_id} não está disponível neste estabelecimento.`);
       }
 
-      const product = products[0];
       const subtotal = Number(product.price) * Number(item.quantity);
       totalAmount += subtotal;
 
@@ -128,20 +129,22 @@ app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
 
     const orderId = orderResult.insertId;
 
-    // 3. INSERE OS ITENS DO PEDIDO (order_items)
-    for (const item of validatedItems) {
-      await connection.query(
-        `INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal) 
-         VALUES (?, ?, ?, ?, ?)`,
-        [orderId, item.product_id, item.quantity, item.unit_price, item.subtotal]
-      );
-    }
+    // 3. INSERE OS ITENS DO PEDIDO EM LOTE (Batch Insert)
+    const orderItemsValues = validatedItems.map(item => [
+      orderId,
+      item.product_id,
+      item.quantity,
+      item.unit_price,
+      item.subtotal
+    ]);
 
-    // 4. CONFIRMA A TRANSAÇÃO (salva tudo definitivamente)
+    await connection.query(
+      `INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal) VALUES ?`,
+      [orderItemsValues]
+    );
+
+    // 4. CONFIRMA A TRANSAÇÃO
     await connection.commit();
-
-    // Devolve a conexão ao pool
-    connection.release();
 
     res.status(201).json({
       message: 'Pedido realizado com sucesso!',
@@ -151,14 +154,13 @@ app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
     });
 
   } catch (err) {
-    // 5. EM CASO DE ERRO, DESFAZ QUALQUER ALTERAÇÃO NO BANCO
+    // 5. EM CASO DE ERRO, DESFAZ A TRANSAÇÃO
     await connection.rollback();
-    
-    // Sempre libere a conexão de volta ao Pool!
-    connection.release();
-
     console.error('Erro na transação de pedido:', err.message);
     res.status(500).json({ error: 'Erro ao processar o pedido: ' + err.message });
+  } finally {
+    // GARANTE QUE A CONEXÃO É DEVOLVIDA AO POOL (Evita vazamento de conexões)
+    connection.release();
   }
 });
 
@@ -166,7 +168,7 @@ app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
 app.get('/api/orders/:slug', tenantMiddleware, async (req, res) => {
   try {
     const restaurantId = req.restaurant.id;
-    const { status } = req.query; // Permite filtrar por query param ex: ?status=pending
+    const { status } = req.query;
 
     let query = `
       SELECT 
@@ -192,7 +194,6 @@ app.get('/api/orders/:slug', tenantMiddleware, async (req, res) => {
 
     const queryParams = [restaurantId];
 
-    // Se o painel passar um filtro de status
     if (status) {
       query += ` AND o.status = ?`;
       queryParams.push(status);
@@ -202,7 +203,6 @@ app.get('/api/orders/:slug', tenantMiddleware, async (req, res) => {
 
     const [rows] = await pool.query(query, queryParams);
 
-    // Agrupa as linhas do banco (flat rows) em objetos de Pedidos com array de itens
     const ordersMap = new Map();
 
     for (const row of rows) {
@@ -220,7 +220,6 @@ app.get('/api/orders/:slug', tenantMiddleware, async (req, res) => {
         });
       }
 
-      // Se existir item vinculado, adiciona no array items do pedido
       if (row.item_id) {
         ordersMap.get(row.order_id).items.push({
           item_id: row.item_id,
@@ -256,14 +255,12 @@ app.put('/api/orders/:slug/:orderId/status', tenantMiddleware, async (req, res) 
 
     const validStatuses = ['pending', 'preparing', 'shipped', 'delivered', 'cancelled'];
 
-    // Validar se o status enviado é válido
     if (!status || !validStatuses.includes(status)) {
       return res.status(400).json({ 
         error: `Status inválido. Use um dos seguintes: ${validStatuses.join(', ')}` 
       });
     }
 
-    // Executa a atualização garantindo que o pedido pertence ao restaurant_id correto (Isolamento Multi-tenant)
     const [result] = await pool.query(
       `UPDATE orders 
        SET status = ? 
