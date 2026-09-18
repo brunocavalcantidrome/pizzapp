@@ -11,8 +11,18 @@
       <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
       <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
     </nav>
-    <div style="display:flex; align-items:center; gap:12px;">
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
       <button type="button" class="secondary small" id="sound-toggle" onclick="toggleSound()">🔔 Ativar som</button>
+      <select id="sound-choice" onchange="onSoundChoiceChange()">
+        <option value="sino-duplo">Sino duplo</option>
+        <option value="ding-dong">Ding-Dong clássico</option>
+        <option value="sininho-loja">Sininho de loja</option>
+        <option value="alerta">Alerta de notificação</option>
+        <option value="recepcao">Sino de recepção</option>
+        <option value="tijolao">Tijolão (Motorola)</option>
+        <option value="pizzatime">PizzaTime</option>
+      </select>
+      <button type="button" class="secondary small" onclick="testSelectedSound()">▶ Testar</button>
       <span id="connection-dot" title="Conexão em tempo real">●</span>
       <select id="status-filter" onchange="applyFilter()">
         <option value="">Todos os status</option>
@@ -50,6 +60,7 @@
 <script src="/socket.io/socket.io.js"></script>
 <script>
   const SLUG = '<%= restaurant.slug %>';
+  const INITIAL_SOUND_CHOICE = '<%= restaurant.notification_sound %>';
   const STATUSES = ['pending', 'preparing', 'shipped', 'delivered', 'cancelled'];
   const STATUS_LABELS = {
     pending: 'Pendente',
@@ -127,6 +138,17 @@
   // --- Som de novo pedido (Web Audio API, sem depender de arquivo de audio) ---
   let audioCtx = null;
   let soundEnabled = localStorage.getItem('pizzapp_sound_enabled') === 'true';
+  let currentSoundChoice = INITIAL_SOUND_CHOICE || 'sino-duplo';
+
+  function ensureAudioCtx() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    return audioCtx;
+  }
 
   function updateSoundButton() {
     document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Som ativado' : '🔕 Ativar som';
@@ -135,33 +157,141 @@
   function toggleSound() {
     soundEnabled = !soundEnabled;
     localStorage.setItem('pizzapp_sound_enabled', soundEnabled);
-    if (soundEnabled && !audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    if (audioCtx && audioCtx.state === 'suspended') {
-      audioCtx.resume();
-    }
+    if (soundEnabled) ensureAudioCtx();
     updateSoundButton();
   }
 
-  function playNewOrderSound() {
-    if (!soundEnabled || !audioCtx) return;
-
-    const now = audioCtx.currentTime;
-    [880, 1175].forEach((freq, i) => {
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.0001, now + i * 0.18);
-      gain.gain.exponentialRampToValueAtTime(0.3, now + i * 0.18 + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.18 + 0.3);
-      osc.connect(gain).connect(audioCtx.destination);
-      osc.start(now + i * 0.18);
-      osc.stop(now + i * 0.18 + 0.3);
-    });
+  function tone(c, freq, start, duration, peakGain, type = 'sine') {
+    const osc = c.createOscillator();
+    const gain = c.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(peakGain, start + Math.min(0.03, duration * 0.2));
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    osc.connect(gain).connect(c.destination);
+    osc.start(start);
+    osc.stop(start + duration);
   }
 
+  function playSinoDuplo(c) {
+    const now = c.currentTime;
+    [880, 1175].forEach((freq, i) => tone(c, freq, now + i * 0.28, 0.6, 0.8));
+  }
+
+  function playDingDong(c) {
+    const now = c.currentTime;
+    tone(c, 784, now, 0.9, 0.9);
+    tone(c, 587, now + 0.55, 1.1, 0.9);
+  }
+
+  function playSininhoLoja(c) {
+    const now = c.currentTime;
+    [1568, 1976, 1568].forEach((freq, i) => tone(c, freq, now + i * 0.15, 0.25, 0.7));
+  }
+
+  function playAlerta(c) {
+    const now = c.currentTime;
+    [1046, 1046, 1046].forEach((freq, i) => tone(c, freq, now + i * 0.2, 0.12, 0.9, 'square'));
+  }
+
+  function playRecepcao(c) {
+    const now = c.currentTime;
+    const fundamental = 1318.5; // E6
+    [1, 2.01, 3.02, 4.05].forEach((mult, i) => tone(c, fundamental * mult, now, 2.2 - i * 0.3, 0.9 / (i + 1)));
+  }
+
+  function playTijolao(c) {
+    const now = c.currentTime;
+    function burst(startTime) {
+      const freqs = [1400, 1050];
+      const stepDur = 0.045;
+      const totalSteps = 18;
+      for (let i = 0; i < totalSteps; i++) {
+        tone(c, freqs[i % 2], startTime + i * stepDur, stepDur * 0.95, 0.85, 'square');
+      }
+    }
+    burst(now);
+    burst(now + 1.1);
+  }
+
+  function playPizzaTime(c) {
+    const startTime = c.currentTime;
+    const freqA = 4200;
+    const freqB = freqA / 2;
+    const beepDuration = 0.04;
+    let totalBeepsPerBurst = 8;
+    const burstDuration = totalBeepsPerBurst * beepDuration;
+    const pauseBetweenBursts = 0.3;
+
+    for (let burst = 0; burst < 3; burst++) {
+      const burstStartTime = startTime + burst * (burstDuration + pauseBetweenBursts);
+      if (burst === 2) totalBeepsPerBurst = 20;
+
+      for (let i = 0; i < totalBeepsPerBurst; i++) {
+        const osc = c.createOscillator();
+        const gainNode = c.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(i % 2 === 0 ? freqA : freqB, burstStartTime);
+
+        const noteStart = burstStartTime + (i * beepDuration);
+        const noteEnd = noteStart + beepDuration;
+
+        gainNode.gain.setValueAtTime(0, startTime);
+        gainNode.gain.setValueAtTime(0.6, noteStart);
+        gainNode.gain.setValueAtTime(0, noteEnd - 0.005);
+
+        osc.connect(gainNode);
+        gainNode.connect(c.destination);
+        osc.start(noteStart);
+        osc.stop(noteEnd);
+      }
+    }
+  }
+
+  const SOUND_PLAYERS = {
+    'sino-duplo': playSinoDuplo,
+    'ding-dong': playDingDong,
+    'sininho-loja': playSininhoLoja,
+    'alerta': playAlerta,
+    'recepcao': playRecepcao,
+    'tijolao': playTijolao,
+    'pizzatime': playPizzaTime
+  };
+
+  function playNewOrderSound() {
+    if (!soundEnabled) return;
+    const c = ensureAudioCtx();
+    (SOUND_PLAYERS[currentSoundChoice] || playSinoDuplo)(c);
+  }
+
+  function testSelectedSound() {
+    const c = ensureAudioCtx();
+    (SOUND_PLAYERS[currentSoundChoice] || playSinoDuplo)(c);
+  }
+
+  async function onSoundChoiceChange() {
+    currentSoundChoice = document.getElementById('sound-choice').value;
+    testSelectedSound();
+
+    try {
+      const res = await fetch(`/api/settings/${SLUG}/notification-sound`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notification_sound: currentSoundChoice })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Erro ao salvar preferência de som');
+        return;
+      }
+      showToast('Som de notificação salvo');
+    } catch (err) {
+      showToast('Erro de conexão ao salvar som');
+    }
+  }
+
+  document.getElementById('sound-choice').value = currentSoundChoice;
   updateSoundButton();
 
   // --- Tempo real via Socket.IO ---

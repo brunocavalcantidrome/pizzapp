@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<title>Provador de sons - pizzappp</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #f7f3ee; padding: 32px; max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; }
+  .option { background: #fff; border: 1px solid #e6e0d8; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .option h3 { margin: 0 0 6px; }
+  .option p { margin: 0 0 10px; color: #666; font-size: 0.9rem; }
+  button { background: #d62828; color: #fff; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-size: 0.95rem; }
+  button:hover { background: #a91f1f; }
+  label { display: block; margin: 16px 0 6px; font-size: 0.85rem; color: #666; }
+  input[type=range] { width: 100%; }
+</style>
+</head>
+<body>
+  <h1>🔔 Provador de sons de campainha</h1>
+  <p>Clique pra ouvir cada opção (o volume aqui é o volume MÁXIMO do sistema — todas já vêm mais altas e mais longas que a atual).</p>
+
+  <label>Volume geral do teste: <span id="volLabel">80%</span></label>
+  <input type="range" id="volSlider" min="0" max="100" value="80">
+
+  <div class="option">
+    <h3>1. Sino duplo (mais alto e mais longo que o atual)</h3>
+    <p>A mesma ideia de hoje, só que com o dobro da duração e bem mais alto.</p>
+    <button onclick="playDoubleBell()">▶ Ouvir</button>
+  </div>
+
+  <div class="option">
+    <h3>2. Ding-Dong clássico de campainha</h3>
+    <p>Duas notas graves e sustentadas, como campainha de porta de verdade.</p>
+    <button onclick="playDingDong()">▶ Ouvir</button>
+  </div>
+
+  <div class="option">
+    <h3>3. Sininho de loja (3 tilintadas)</h3>
+    <p>Agudo, tipo sininho de porta de loja — curto mas repetitivo, bem perceptível.</p>
+    <button onclick="playShopBell()">▶ Ouvir</button>
+  </div>
+
+  <div class="option">
+    <h3>4. Alerta de notificação (3 bipes)</h3>
+    <p>Estilo "toc-toc-toc" de app de celular — chama atenção sem ser irritante.</p>
+    <button onclick="playAlert()">▶ Ouvir</button>
+  </div>
+
+  <div class="option">
+    <h3>5. Sino de recepção de hotel</h3>
+    <p>Aquele "ding!" de sineta de balcão — som único, brilhante, com reverb.</p>
+    <button onclick="playReceptionBell()">▶ Ouvir</button>
+  </div>
+
+  <div class="option">
+    <h3>6. "Tijolão" estilo Motorola (recriação aproximada)</h3>
+    <p>⚠️ Recriação de memória do bipe eletrônico alternado dos celulares tijolão de antigamente — não é o sample original, é uma aproximação de frequência e ritmo.</p>
+    <button onclick="playBrickPhone()">▶ Ouvir</button>
+  </div>
+
+  <div class="option">
+    <h3>7. "pizzapp" (especificação exata sua)</h3>
+    <p>2700Hz / 2050Hz onda quadrada, trinado de 4 alternâncias (35ms cada) + pausa de 60ms, 3 trinados por rodada, pausa longa de 2s. Toca em loop, tipo campainha de chamada, até você apertar Parar.</p>
+    <button onclick="playpizzapp()">▶ Tocar (loop)</button>
+    <button onclick="stoppizzapp()" style="background:#767676;">⏹ Parar</button>
+  </div>
+
+  <div class="option">
+    <h3>8. "PizzaTime" (toque MicroTAC, 1x)</h3>
+    <p>3 rajadas de bipes alternados (4200Hz / 2100Hz, onda quadrada) estilo celular antigo — "Trim-trim... Trim-trim... Trim-trim", a última rajada mais longa. Toca uma única vez por clique.</p>
+    <button onclick="playPizzaTime()">▶ Ouvir</button>
+  </div>
+
+<script>
+let audioCtx = null;
+function ctx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function masterVolume() {
+  return document.getElementById('volSlider').value / 100;
+}
+
+document.getElementById('volSlider').addEventListener('input', (e) => {
+  document.getElementById('volLabel').textContent = e.target.value + '%';
+});
+
+function tone(c, freq, start, duration, peakGain, type = 'sine') {
+  const osc = c.createOscillator();
+  const gain = c.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(peakGain, start + Math.min(0.03, duration * 0.2));
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  osc.connect(gain).connect(c.destination);
+  osc.start(start);
+  osc.stop(start + duration);
+}
+
+// 1. Sino duplo, mais forte e mais longo
+function playDoubleBell() {
+  const c = ctx();
+  const now = c.currentTime;
+  const vol = masterVolume();
+  [880, 1175].forEach((freq, i) => {
+    tone(c, freq, now + i * 0.28, 0.6, 0.8 * vol);
+  });
+}
+
+// 2. Ding-dong classico
+function playDingDong() {
+  const c = ctx();
+  const now = c.currentTime;
+  const vol = masterVolume();
+  tone(c, 784, now, 0.9, 0.9 * vol);
+  tone(c, 587, now + 0.55, 1.1, 0.9 * vol);
+}
+
+// 3. Sininho de loja - 3 tilintadas agudas
+function playShopBell() {
+  const c = ctx();
+  const now = c.currentTime;
+  const vol = masterVolume();
+  [1568, 1976, 1568].forEach((freq, i) => {
+    tone(c, freq, now + i * 0.15, 0.25, 0.7 * vol);
+  });
+}
+
+// 4. Alerta tipo notificacao - 3 bipes curtos
+function playAlert() {
+  const c = ctx();
+  const now = c.currentTime;
+  const vol = masterVolume();
+  [1046, 1046, 1046].forEach((freq, i) => {
+    tone(c, freq, now + i * 0.2, 0.12, 0.9 * vol, 'square');
+  });
+}
+
+// 5. Sino de recepcao - "ding" unico com reverb simulado (varias harmonicas decaindo)
+function playReceptionBell() {
+  const c = ctx();
+  const now = c.currentTime;
+  const vol = masterVolume();
+  const fundamental = 1318.5; // E6
+  [1, 2.01, 3.02, 4.05].forEach((mult, i) => {
+    tone(c, fundamental * mult, now, 2.2 - i * 0.3, (0.9 / (i + 1)) * vol);
+  });
+}
+
+// 6. "Tijolao" estilo Motorola - bipe eletronico alternando rapido, em duas rajadas (ring-ring)
+function playBrickPhone() {
+  const c = ctx();
+  const now = c.currentTime;
+  const vol = masterVolume();
+
+  function burst(startTime) {
+    // dentro de cada rajada, alterna rapido entre duas frequencias (~12x por segundo)
+    const freqs = [1400, 1050];
+    const stepDur = 0.045;
+    const totalSteps = 18; // ~0.8s de rajada
+    for (let i = 0; i < totalSteps; i++) {
+      tone(c, freqs[i % 2], startTime + i * stepDur, stepDur * 0.95, 0.85 * vol, 'square');
+    }
+  }
+
+  burst(now);        // primeira rajada "ring-ring"
+  burst(now + 1.1);  // pausa curta, segunda rajada
+}
+
+// 7. "pizzapp" - especificacao exata:
+//    Tom A = 2700Hz, Tom B = 2050Hz, ambos onda quadrada
+//    Trinado = A(35ms) B(35ms) A(35ms) B(35ms) = 140ms
+//    Pausa entre trinados = 60ms
+//    Rodada = trinado + pausa, trinado + pausa, trinado (3 trinados, 2 pausas) = 540ms
+//    Pausa longa apos a rodada = 2000ms, repete em loop
+const pizzapp_TOM_A = 2700;
+const pizzapp_TOM_B = 2050;
+const pizzapp_NOTA_MS = 35;
+const pizzapp_PAUSA_CURTA_MS = 0;
+const pizzapp_PAUSA_LONGA_MS = 3000;
+const pizzapp_TRINADO_MS = pizzapp_NOTA_MS * 4; // 140ms
+const pizzapp_RODADA_MS = (pizzapp_TRINADO_MS + pizzapp_PAUSA_CURTA_MS) * 2 + pizzapp_TRINADO_MS; // 540ms
+const pizzapp_CICLO_MS = pizzapp_RODADA_MS + pizzapp_PAUSA_LONGA_MS; // 2540ms
+
+let pizzappTimer = null;
+let pizzappPlaying = false;
+
+// Toque com ataque/release minimo (2ms) para evitar clique, mantendo o som "seco" tipo pager
+function pizzappTone(c, freq, startTime, durationMs) {
+  const durationSec = durationMs / 1000;
+  const attack = 0.002;
+  const osc = c.createOscillator();
+  const gain = c.createGain();
+  osc.type = 'square';
+  osc.frequency.value = freq;
+  const vol = masterVolume();
+  gain.gain.setValueAtTime(0.0001, startTime);
+  gain.gain.linearRampToValueAtTime(0.7 * vol, startTime + attack);
+  gain.gain.setValueAtTime(0.7 * vol, startTime + durationSec - attack);
+  gain.gain.linearRampToValueAtTime(0.0001, startTime + durationSec);
+  osc.connect(gain).connect(c.destination);
+  osc.start(startTime);
+  osc.stop(startTime + durationSec);
+}
+
+function pizzappTrinado(c, startTime) {
+  const freqs = [pizzapp_TOM_A, pizzapp_TOM_B, pizzapp_TOM_A, pizzapp_TOM_B];
+  freqs.forEach((freq, i) => {
+    pizzappTone(c, freq, startTime + (i * pizzapp_NOTA_MS) / 1000, pizzapp_NOTA_MS);
+  });
+}
+
+function pizzappRodada(c, startTime) {
+  pizzappTrinado(c, startTime);
+  pizzappTrinado(c, startTime + (pizzapp_TRINADO_MS + pizzapp_PAUSA_CURTA_MS) / 1000);
+  pizzappTrinado(c, startTime + 2 * (pizzapp_TRINADO_MS + pizzapp_PAUSA_CURTA_MS) / 1000);
+}
+
+function playpizzapp() {
+  if (pizzappPlaying) return;
+  pizzappPlaying = true;
+  const c = ctx();
+
+  function loop() {
+    if (!pizzappPlaying) return;
+    pizzappRodada(c, c.currentTime);
+    pizzappTimer = setTimeout(loop, pizzapp_CICLO_MS);
+  }
+
+  loop();
+}
+
+function stoppizzapp() {
+  pizzappPlaying = false;
+  if (pizzappTimer) {
+    clearTimeout(pizzappTimer);
+    pizzappTimer = null;
+  }
+}
+
+// 8. "PizzaTime" - toque estilo MicroTAC (bipes alternados em 3 rajadas), toca 1x por clique
+function playPizzaTime() {
+  const c = ctx();
+  const vol = masterVolume();
+  const startTime = c.currentTime;
+
+  const freqA = 4200; // Frequencia alta tipica dos beeps antigos (Hz)
+  const freqB = freqA / 2; // Segunda frequencia para o efeito alternado (Hz)
+  const beepDuration = 0.04; // Duracao de cada micro-beep (40ms) - super rapido
+  let totalBeepsPerBurst = 8; // Quantidade de oscilacoes por rajada
+  const burstDuration = totalBeepsPerBurst * beepDuration; // ~0.32s por rajada
+  const pauseBetweenBursts = 0.3; // Pausa ate a proxima rajada de toques
+  let burstStartTime;
+
+  // 3 rajadas classicas ("Trim-trim... Trim-trim... Trim-trim")
+  for (let burst = 0; burst < 3; burst++) {
+    burstStartTime = startTime + burst * (burstDuration + pauseBetweenBursts);
+
+    // Ultima rajada e mais longa
+    if (burst === 2) { totalBeepsPerBurst = 20; }
+
+    for (let i = 0; i < totalBeepsPerBurst; i++) {
+      const osc = c.createOscillator();
+      const gainNode = c.createGain();
+
+      // Onda Quadrada: essencial para o som "eletronico/pixelado" dos anos 80
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(i % 2 === 0 ? freqA : freqB, burstStartTime);
+
+      const noteStart = burstStartTime + (i * beepDuration);
+      const noteEnd = noteStart + beepDuration;
+
+      // Envelope de volume rapido (evita estalos bruscos nos alto-falantes)
+      gainNode.gain.setValueAtTime(0, startTime);
+      gainNode.gain.setValueAtTime(0.6 * vol, noteStart);
+      gainNode.gain.setValueAtTime(0, noteEnd - 0.005);
+
+      osc.connect(gainNode);
+      gainNode.connect(c.destination);
+
+      osc.start(noteStart);
+      osc.stop(noteEnd);
+    }
+  }
+}
+</script>
+</body>
+</html>

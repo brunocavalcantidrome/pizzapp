@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>MicroTAC 9800X Ringtone</title>
+    <style>
+        body { display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; background: #222; color: #fff; }
+        button { padding: 15px 30px; font-size: 18px; cursor: pointer; border: none; background: #00ff66; color: #000; font-weight: bold; border-radius: 5px; }
+        button:active { background: #00cc55; }
+    </style>
+</head>
+<body>
+
+    <button id="ringBtn">Tocar MicroTAC 9800X</button>
+
+<script>
+const button = document.getElementById('ringBtn');
+
+button.addEventListener('click', () => {
+    // 1. Inicializa o contexto de áudio (obrigatório após clique do usuário devido ao Autoplay)
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    const audioCtx = new AudioContext();
+
+    const startTime = audioCtx.currentTime;
+    
+    // Configurações do toque clássico do MicroTAC
+    const freqA = 4200; // Frequência alta típica dos beeps antigos (Hz)
+    const freqB = freqA / 2; // Segunda frequência para o efeito alternado (Hz)
+    const beepDuration = 0.04; // Duração de cada micro-beep (40ms) - super rápido
+    let totalBeepsPerBurst = 8; // Quantidade de oscilações por rajada
+    let burstDuration = totalBeepsPerBurst * beepDuration; // ~0.32 segundos por rajada
+    const pauseBetweenBursts = 0.3; // Pausa até a próxima rajada de toques
+    let burstStartTime;
+    // Vamos agendar 3 rajadas clássicas ("Trim-trim... Trim-trim... Trim-trim")
+    for (let burst = 0; burst < 3; burst++) {
+        burstStartTime = 2 * startTime + burst * (burstDuration + pauseBetweenBursts);
+        
+
+        // Cria os micro-beeps alternados dentro de uma mesma rajada
+        if(burst == 2){totalBeepsPerBurst = 20;}
+        for (let i = 0; i < totalBeepsPerBurst; i++) {
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            // Onda Quadrada (Square): Essencial para o som "eletrônico/pixelado" dos anos 80
+            osc.type = 'square';
+            
+            // Altera o pitch entre o Beep Alto e Beep Baixo sequencialmente
+            osc.frequency.setValueAtTime(i % 2 === 0 ? freqA : freqB, burstStartTime);
+
+            // Controle exato do tempo de início e fim do som
+            const noteStart = burstStartTime + (i * beepDuration);
+            const noteEnd = noteStart + beepDuration;
+
+            // Envelope de volume rápido (evita estalos bruscos nos alto-falantes)
+            gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.15, noteStart); // Volume moderado (onda quadrada é naturalmente barulhenta)
+            gainNode.gain.setValueAtTime(0, noteEnd - 0.005); // Suaviza no micro-final
+
+            // Conexões físicas do grafo de áudio
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            // Inicia e para o oscilador cirurgicamente no tempo agendado
+            osc.start(noteStart);
+            osc.stop(noteEnd);
+        }
+    }
+});
+</script>
+</body>
+</html>

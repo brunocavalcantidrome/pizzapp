@@ -54,6 +54,17 @@ const adminAuth = basicAuth('ADMIN_USER', 'ADMIN_PASSWORD', 'Painel Administrati
 // Autentica o admin do sistema (gerencia todos os estabelecimentos)
 const sysAdminAuth = basicAuth('SYSADMIN_USER', 'SYSADMIN_PASSWORD', 'Administração do Sistema');
 
+// Sons de notificação disponíveis para o painel de pedidos (gerados via Web Audio API no navegador)
+const NOTIFICATION_SOUNDS = [
+  'sino-duplo',
+  'ding-dong',
+  'sininho-loja',
+  'alerta',
+  'recepcao',
+  'tijolao',
+  'pizzatime'
+];
+
 // Configuração do Connection Pool
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
@@ -71,7 +82,7 @@ async function tenantMiddleware(req, res, next) {
 
   try {
     const [rows] = await pool.query(
-      'SELECT id, name, slug, whatsapp, is_active FROM restaurants WHERE slug = ?',
+      'SELECT id, name, slug, whatsapp, is_active, notification_sound FROM restaurants WHERE slug = ?',
       [slug]
     );
 
@@ -575,6 +586,29 @@ app.put('/api/orders/:slug/:orderId/status', adminAuth, tenantMiddleware, async 
   } catch (err) {
     console.error('Erro ao atualizar status do pedido:', err);
     res.status(500).json({ error: 'Erro interno ao alterar status.' });
+  }
+});
+
+// Rota para o lojista escolher o som de notificação de pedido novo do seu painel
+app.put('/api/settings/:slug/notification-sound', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const { notification_sound } = req.body;
+
+    if (!NOTIFICATION_SOUNDS.includes(notification_sound)) {
+      return res.status(400).json({
+        error: `Som inválido. Use um dos seguintes: ${NOTIFICATION_SOUNDS.join(', ')}`
+      });
+    }
+
+    await pool.query(
+      'UPDATE restaurants SET notification_sound = ? WHERE id = ?',
+      [notification_sound, req.restaurant.id]
+    );
+
+    res.json({ message: 'Som de notificação atualizado com sucesso!', notification_sound });
+  } catch (err) {
+    console.error('Erro ao atualizar som de notificação:', err);
+    res.status(500).json({ error: 'Erro interno ao salvar preferência de som.' });
   }
 });
 
