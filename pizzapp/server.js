@@ -313,6 +313,19 @@ app.get('/sistema/admin', sysAdminAuth, (req, res) => {
   res.render('system/restaurants');
 });
 
+// Teste de Saúde / Conexão
+// Precisa vir antes de '/:slug': como esse padrão casa qualquer segmento
+// unico da URL, se ficasse depois o Express tentaria tratar "health"
+// como um slug de estabelecimento.
+app.get('/health', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT NOW() AS data_atual');
+    res.json({ status: 'OK', db_time: rows[0].data_atual });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro no banco' });
+  }
+});
+
 // Rota pública: página do cardápio para o cliente fazer pedidos
 app.get('/:slug', tenantMiddleware, async (req, res) => {
   try {
@@ -336,16 +349,6 @@ app.get('/:slug/admin', adminAuth, tenantMiddleware, (req, res) => {
 // Rota do painel administrativo: produtos
 app.get('/:slug/admin/produtos', adminAuth, tenantMiddleware, (req, res) => {
   res.render('admin/products', { restaurant: req.restaurant });
-});
-
-// Teste de Saúde / Conexão
-app.get('/health', async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT NOW() AS data_atual');
-    res.json({ status: 'OK', db_time: rows[0].data_atual });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro no banco' });
-  }
 });
 
 // Rota POST para receber o pedido do carrinho (Otimizada e Segura)
