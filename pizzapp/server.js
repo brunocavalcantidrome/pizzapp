@@ -48,7 +48,7 @@ async function tenantMiddleware(req, res, next) {
 
   try {
     const [rows] = await pool.query(
-      'SELECT id, name, whatsapp, is_active FROM restaurants WHERE slug = ?', 
+      'SELECT id, name, slug, whatsapp, is_active FROM restaurants WHERE slug = ?',
       [slug]
     );
 
