@@ -13,23 +13,31 @@ app.set('views', path.join(__dirname, 'views'));
 
 const PORT = process.env.PORT || 3000;
 
-// Middleware de autenticação básica para o painel do administrador
-function adminAuth(req, res, next) {
-  const user = process.env.ADMIN_USER;
-  const pass = process.env.ADMIN_PASSWORD;
+// Fábrica de middlewares de autenticação básica (um para o painel do lojista, outro para o admin do sistema)
+function basicAuth(userEnvVar, passEnvVar, realm) {
+  return function (req, res, next) {
+    const user = process.env[userEnvVar];
+    const pass = process.env[passEnvVar];
 
-  const header = req.headers.authorization;
-  if (header) {
-    const [, encoded] = header.split(' ');
-    const [reqUser, reqPass] = Buffer.from(encoded || '', 'base64').toString().split(':');
-    if (reqUser === user && reqPass === pass) {
-      return next();
+    const header = req.headers.authorization;
+    if (header) {
+      const [, encoded] = header.split(' ');
+      const [reqUser, reqPass] = Buffer.from(encoded || '', 'base64').toString().split(':');
+      if (reqUser === user && reqPass === pass) {
+        return next();
+      }
     }
-  }
 
-  res.set('WWW-Authenticate', 'Basic realm="Painel Administrativo"');
-  return res.status(401).send('Autenticação necessária.');
+    res.set('WWW-Authenticate', `Basic realm="${realm}"`);
+    return res.status(401).send('Autenticação necessária.');
+  };
 }
+
+// Autentica o lojista (painel por estabelecimento)
+const adminAuth = basicAuth('ADMIN_USER', 'ADMIN_PASSWORD', 'Painel Administrativo');
+
+// Autentica o admin do sistema (gerencia todos os estabelecimentos)
+const sysAdminAuth = basicAuth('SYSADMIN_USER', 'SYSADMIN_PASSWORD', 'Administração do Sistema');
 
 // Configuração do Connection Pool
 const pool = mysql.createPool({
@@ -175,6 +183,119 @@ app.delete('/api/products/:slug/:productId', adminAuth, tenantMiddleware, async 
     console.error('Erro ao excluir produto:', err);
     res.status(500).json({ error: 'Erro ao excluir produto. Verifique se ele não está associado a pedidos existentes.' });
   }
+});
+
+// ===== Admin do Sistema: gerencia todos os estabelecimentos (multi-tenant) =====
+
+// Rota (sistema) para listar todos os estabelecimentos
+app.get('/api/sistema/restaurants', sysAdminAuth, async (req, res) => {
+  try {
+    const [restaurants] = await pool.query(
+      'SELECT id, name, slug, whatsapp, is_active FROM restaurants ORDER BY name'
+    );
+    res.json({ restaurants });
+  } catch (err) {
+    console.error('Erro ao listar estabelecimentos:', err);
+    res.status(500).json({ error: 'Erro ao carregar estabelecimentos.' });
+  }
+});
+
+// Rota (sistema) para criar um novo estabelecimento
+app.post('/api/sistema/restaurants', sysAdminAuth, async (req, res) => {
+  try {
+    const { name, slug, whatsapp } = req.body;
+
+    if (!name || !slug) {
+      return res.status(400).json({ error: 'Nome e slug são obrigatórios.' });
+    }
+
+    const slugPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+    if (!slugPattern.test(slug)) {
+      return res.status(400).json({ error: 'Slug inválido. Use apenas letras minúsculas, números e hífens (ex: pizzaria-do-bruno).' });
+    }
+
+    const [result] = await pool.query(
+      'INSERT INTO restaurants (name, slug, whatsapp, is_active) VALUES (?, ?, ?, TRUE)',
+      [name, slug, whatsapp || null]
+    );
+
+    res.status(201).json({ message: 'Estabelecimento criado com sucesso!', restaurant_id: result.insertId });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Já existe um estabelecimento com esse slug.' });
+    }
+    console.error('Erro ao criar estabelecimento:', err);
+    res.status(500).json({ error: 'Erro ao criar estabelecimento.' });
+  }
+});
+
+// Rota (sistema) para editar um estabelecimento (nome, slug, whatsapp, status de funcionamento)
+app.put('/api/sistema/restaurants/:id', sysAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, slug, whatsapp, is_active } = req.body;
+
+    if (slug !== undefined) {
+      const slugPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+      if (!slugPattern.test(slug)) {
+        return res.status(400).json({ error: 'Slug inválido. Use apenas letras minúsculas, números e hífens (ex: pizzaria-do-bruno).' });
+      }
+    }
+
+    const fields = [];
+    const values = [];
+
+    if (name !== undefined) { fields.push('name = ?'); values.push(name); }
+    if (slug !== undefined) { fields.push('slug = ?'); values.push(slug); }
+    if (whatsapp !== undefined) { fields.push('whatsapp = ?'); values.push(whatsapp); }
+    if (is_active !== undefined) { fields.push('is_active = ?'); values.push(Boolean(is_active)); }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: 'Nenhum campo para atualizar foi informado.' });
+    }
+
+    values.push(id);
+
+    const [result] = await pool.query(
+      `UPDATE restaurants SET ${fields.join(', ')} WHERE id = ?`,
+      values
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Estabelecimento não encontrado.' });
+    }
+
+    res.json({ message: 'Estabelecimento atualizado com sucesso!' });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Já existe um estabelecimento com esse slug.' });
+    }
+    console.error('Erro ao atualizar estabelecimento:', err);
+    res.status(500).json({ error: 'Erro ao atualizar estabelecimento.' });
+  }
+});
+
+// Rota (sistema) para excluir um estabelecimento
+app.delete('/api/sistema/restaurants/:id', sysAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [result] = await pool.query('DELETE FROM restaurants WHERE id = ?', [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Estabelecimento não encontrado.' });
+    }
+
+    res.json({ message: 'Estabelecimento excluído com sucesso!' });
+  } catch (err) {
+    console.error('Erro ao excluir estabelecimento:', err);
+    res.status(500).json({ error: 'Erro ao excluir estabelecimento. Verifique se ele não possui produtos ou pedidos associados.' });
+  }
+});
+
+// Página do painel de administração do sistema
+app.get('/sistema/admin', sysAdminAuth, (req, res) => {
+  res.render('system/restaurants');
 });
 
 // Rota pública: página do cardápio para o cliente fazer pedidos

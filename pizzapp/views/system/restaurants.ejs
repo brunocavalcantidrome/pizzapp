@@ -1,0 +1,242 @@
+<%- include('../partials/head', { title: 'Administração do Sistema' }) %>
+
+<header class="topbar">
+  <h1>Administração do Sistema</h1>
+  <span>Todos os estabelecimentos</span>
+</header>
+
+<main>
+  <div class="grid">
+    <section>
+      <div class="card">
+        <h2>Estabelecimentos</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Nome</th>
+              <th>Slug</th>
+              <th>WhatsApp</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="restaurants-body">
+            <tr><td colspan="5" class="empty">Carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <aside>
+      <div class="card">
+        <h2>Novo Estabelecimento</h2>
+        <form id="restaurant-form">
+          <label>Nome</label>
+          <input type="text" id="r_name" required>
+
+          <label>Slug (usado na URL)</label>
+          <input type="text" id="r_slug" placeholder="ex: pizzaria-do-bruno" required>
+
+          <label>WhatsApp</label>
+          <input type="text" id="r_whatsapp" placeholder="ex: 5571987301606">
+
+          <div id="restaurant-error" class="msg-error"></div>
+          <button type="submit" style="width:100%;">Criar estabelecimento</button>
+        </form>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  function slugify(str) {
+    return str.toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  let restaurantsCache = [];
+
+  async function loadRestaurants() {
+    const res = await fetch('/api/sistema/restaurants');
+    const data = await res.json();
+    restaurantsCache = data.restaurants || [];
+    renderTable();
+  }
+
+  function renderTable() {
+    const body = document.getElementById('restaurants-body');
+    body.innerHTML = '';
+
+    if (restaurantsCache.length === 0) {
+      body.innerHTML = '<tr><td colspan="5" class="empty">Nenhum estabelecimento cadastrado.</td></tr>';
+      return;
+    }
+
+    restaurantsCache.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.dataset.id = r.id;
+      tr.innerHTML = viewRow(r);
+      body.appendChild(tr);
+    });
+  }
+
+  function viewRow(r) {
+    const statusBadge = r.is_active
+      ? '<span class="badge delivered">Ativo</span>'
+      : '<span class="badge cancelled">Suspenso / Inadimplente</span>';
+
+    return `
+      <td>${r.name}</td>
+      <td><a href="/${r.slug}" target="_blank">/${r.slug}</a></td>
+      <td>${r.whatsapp || '-'}</td>
+      <td>${statusBadge}</td>
+      <td>
+        <button class="small" onclick="editRow(${r.id})">Editar</button>
+        <button class="small ${r.is_active ? 'secondary' : ''}" onclick="toggleStatus(${r.id}, ${!r.is_active})">
+          ${r.is_active ? 'Suspender' : 'Reativar'}
+        </button>
+        <button class="small danger" onclick="removeRestaurant(${r.id})">Excluir</button>
+      </td>
+    `;
+  }
+
+  function editRow(id) {
+    const r = restaurantsCache.find(x => x.id === id);
+    const tr = document.querySelector(`tr[data-id="${id}"]`);
+
+    tr.innerHTML = `
+      <td><input type="text" id="edit_name_${id}" value="${r.name}"></td>
+      <td><input type="text" id="edit_slug_${id}" value="${r.slug}"></td>
+      <td><input type="text" id="edit_whatsapp_${id}" value="${r.whatsapp || ''}"></td>
+      <td>
+        <select id="edit_status_${id}">
+          <option value="1" ${r.is_active ? 'selected' : ''}>Ativo</option>
+          <option value="0" ${!r.is_active ? 'selected' : ''}>Suspenso / Inadimplente</option>
+        </select>
+      </td>
+      <td>
+        <button class="small" onclick="saveRow(${id})">Salvar</button>
+        <button class="small secondary" onclick="renderTable()">Cancelar</button>
+      </td>
+    `;
+  }
+
+  async function saveRow(id) {
+    const payload = {
+      name: document.getElementById(`edit_name_${id}`).value,
+      slug: slugify(document.getElementById(`edit_slug_${id}`).value),
+      whatsapp: document.getElementById(`edit_whatsapp_${id}`).value,
+      is_active: document.getElementById(`edit_status_${id}`).value === '1'
+    };
+
+    try {
+      const res = await fetch(`/api/sistema/restaurants/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Erro ao salvar');
+        return;
+      }
+      showToast('Estabelecimento atualizado');
+      loadRestaurants();
+    } catch (err) {
+      showToast('Erro de conexão');
+    }
+  }
+
+  async function toggleStatus(id, newValue) {
+    try {
+      const res = await fetch(`/api/sistema/restaurants/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: newValue })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Erro ao atualizar status');
+        return;
+      }
+      showToast(newValue ? 'Estabelecimento reativado' : 'Estabelecimento suspenso');
+      loadRestaurants();
+    } catch (err) {
+      showToast('Erro de conexão');
+    }
+  }
+
+  async function removeRestaurant(id) {
+    if (!confirm('Excluir este estabelecimento? Essa ação não pode ser desfeita.')) return;
+
+    try {
+      const res = await fetch(`/api/sistema/restaurants/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Erro ao excluir');
+        return;
+      }
+      showToast('Estabelecimento excluído');
+      loadRestaurants();
+    } catch (err) {
+      showToast('Erro de conexão');
+    }
+  }
+
+  document.getElementById('r_slug').addEventListener('input', (e) => {
+    e.target.dataset.touched = 'true';
+  });
+
+  document.getElementById('r_name').addEventListener('input', (e) => {
+    const slugInput = document.getElementById('r_slug');
+    if (!slugInput.dataset.touched) {
+      slugInput.value = slugify(e.target.value);
+    }
+  });
+
+  document.getElementById('restaurant-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('restaurant-error');
+    errorEl.textContent = '';
+
+    const payload = {
+      name: document.getElementById('r_name').value,
+      slug: slugify(document.getElementById('r_slug').value),
+      whatsapp: document.getElementById('r_whatsapp').value
+    };
+
+    try {
+      const res = await fetch('/api/sistema/restaurants', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        errorEl.textContent = data.error || 'Erro ao criar estabelecimento';
+        return;
+      }
+      showToast('Estabelecimento criado');
+      document.getElementById('restaurant-form').reset();
+      delete document.getElementById('r_slug').dataset.touched;
+      loadRestaurants();
+    } catch (err) {
+      errorEl.textContent = 'Erro de conexão';
+    }
+  });
+
+  loadRestaurants();
+</script>
+</body>
+</html>
