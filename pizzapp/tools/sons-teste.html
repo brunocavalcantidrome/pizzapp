@@ -59,14 +59,7 @@
   </div>
 
   <div class="option">
-    <h3>7. "pizzapp" (especificação exata sua)</h3>
-    <p>2700Hz / 2050Hz onda quadrada, trinado de 4 alternâncias (35ms cada) + pausa de 60ms, 3 trinados por rodada, pausa longa de 2s. Toca em loop, tipo campainha de chamada, até você apertar Parar.</p>
-    <button onclick="playpizzapp()">▶ Tocar (loop)</button>
-    <button onclick="stoppizzapp()" style="background:#767676;">⏹ Parar</button>
-  </div>
-
-  <div class="option">
-    <h3>8. "PizzaTime" (toque MicroTAC, 1x)</h3>
+    <h3>7. "PizzaTime" (toque MicroTAC, 1x)</h3>
     <p>3 rajadas de bipes alternados (4200Hz / 2100Hz, onda quadrada) estilo celular antigo — "Trim-trim... Trim-trim... Trim-trim", a última rajada mais longa. Toca uma única vez por clique.</p>
     <button onclick="playPizzaTime()">▶ Ouvir</button>
   </div>
@@ -170,78 +163,7 @@ function playBrickPhone() {
   burst(now + 1.1);  // pausa curta, segunda rajada
 }
 
-// 7. "pizzapp" - especificacao exata:
-//    Tom A = 2700Hz, Tom B = 2050Hz, ambos onda quadrada
-//    Trinado = A(35ms) B(35ms) A(35ms) B(35ms) = 140ms
-//    Pausa entre trinados = 60ms
-//    Rodada = trinado + pausa, trinado + pausa, trinado (3 trinados, 2 pausas) = 540ms
-//    Pausa longa apos a rodada = 2000ms, repete em loop
-const pizzapp_TOM_A = 2700;
-const pizzapp_TOM_B = 2050;
-const pizzapp_NOTA_MS = 35;
-const pizzapp_PAUSA_CURTA_MS = 0;
-const pizzapp_PAUSA_LONGA_MS = 3000;
-const pizzapp_TRINADO_MS = pizzapp_NOTA_MS * 4; // 140ms
-const pizzapp_RODADA_MS = (pizzapp_TRINADO_MS + pizzapp_PAUSA_CURTA_MS) * 2 + pizzapp_TRINADO_MS; // 540ms
-const pizzapp_CICLO_MS = pizzapp_RODADA_MS + pizzapp_PAUSA_LONGA_MS; // 2540ms
-
-let pizzappTimer = null;
-let pizzappPlaying = false;
-
-// Toque com ataque/release minimo (2ms) para evitar clique, mantendo o som "seco" tipo pager
-function pizzappTone(c, freq, startTime, durationMs) {
-  const durationSec = durationMs / 1000;
-  const attack = 0.002;
-  const osc = c.createOscillator();
-  const gain = c.createGain();
-  osc.type = 'square';
-  osc.frequency.value = freq;
-  const vol = masterVolume();
-  gain.gain.setValueAtTime(0.0001, startTime);
-  gain.gain.linearRampToValueAtTime(0.7 * vol, startTime + attack);
-  gain.gain.setValueAtTime(0.7 * vol, startTime + durationSec - attack);
-  gain.gain.linearRampToValueAtTime(0.0001, startTime + durationSec);
-  osc.connect(gain).connect(c.destination);
-  osc.start(startTime);
-  osc.stop(startTime + durationSec);
-}
-
-function pizzappTrinado(c, startTime) {
-  const freqs = [pizzapp_TOM_A, pizzapp_TOM_B, pizzapp_TOM_A, pizzapp_TOM_B];
-  freqs.forEach((freq, i) => {
-    pizzappTone(c, freq, startTime + (i * pizzapp_NOTA_MS) / 1000, pizzapp_NOTA_MS);
-  });
-}
-
-function pizzappRodada(c, startTime) {
-  pizzappTrinado(c, startTime);
-  pizzappTrinado(c, startTime + (pizzapp_TRINADO_MS + pizzapp_PAUSA_CURTA_MS) / 1000);
-  pizzappTrinado(c, startTime + 2 * (pizzapp_TRINADO_MS + pizzapp_PAUSA_CURTA_MS) / 1000);
-}
-
-function playpizzapp() {
-  if (pizzappPlaying) return;
-  pizzappPlaying = true;
-  const c = ctx();
-
-  function loop() {
-    if (!pizzappPlaying) return;
-    pizzappRodada(c, c.currentTime);
-    pizzappTimer = setTimeout(loop, pizzapp_CICLO_MS);
-  }
-
-  loop();
-}
-
-function stoppizzapp() {
-  pizzappPlaying = false;
-  if (pizzappTimer) {
-    clearTimeout(pizzappTimer);
-    pizzappTimer = null;
-  }
-}
-
-// 8. "PizzaTime" - toque estilo MicroTAC (bipes alternados em 3 rajadas), toca 1x por clique
+// 7. "PizzaTime" - toque estilo MicroTAC (bipes alternados em 3 rajadas), toca 1x por clique
 function playPizzaTime() {
   const c = ctx();
   const vol = masterVolume();
