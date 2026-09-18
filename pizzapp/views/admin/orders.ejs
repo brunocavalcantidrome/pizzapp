@@ -11,14 +11,18 @@
       <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
       <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
     </nav>
-    <select id="status-filter" onchange="applyFilter()">
-      <option value="">Todos os status</option>
-      <option value="pending">Pendente</option>
-      <option value="preparing">Preparando</option>
-      <option value="shipped">Saiu para entrega</option>
-      <option value="delivered">Entregue</option>
-      <option value="cancelled">Cancelado</option>
-    </select>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <button type="button" class="secondary small" id="sound-toggle" onclick="toggleSound()">🔔 Ativar som</button>
+      <span id="connection-dot" title="Conexão em tempo real">●</span>
+      <select id="status-filter" onchange="applyFilter()">
+        <option value="">Todos os status</option>
+        <option value="pending">Pendente</option>
+        <option value="preparing">Preparando</option>
+        <option value="shipped">Saiu para entrega</option>
+        <option value="delivered">Entregue</option>
+        <option value="cancelled">Cancelado</option>
+      </select>
+    </div>
   </div>
 
   <div class="card">
@@ -43,6 +47,7 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="/socket.io/socket.io.js"></script>
 <script>
   const SLUG = '<%= restaurant.slug %>';
   const STATUSES = ['pending', 'preparing', 'shipped', 'delivered', 'cancelled'];
@@ -119,8 +124,71 @@
 
   function applyFilter() { loadOrders(); }
 
+  // --- Som de novo pedido (Web Audio API, sem depender de arquivo de audio) ---
+  let audioCtx = null;
+  let soundEnabled = localStorage.getItem('pizzapp_sound_enabled') === 'true';
+
+  function updateSoundButton() {
+    document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Som ativado' : '🔕 Ativar som';
+  }
+
+  function toggleSound() {
+    soundEnabled = !soundEnabled;
+    localStorage.setItem('pizzapp_sound_enabled', soundEnabled);
+    if (soundEnabled && !audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    updateSoundButton();
+  }
+
+  function playNewOrderSound() {
+    if (!soundEnabled || !audioCtx) return;
+
+    const now = audioCtx.currentTime;
+    [880, 1175].forEach((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, now + i * 0.18);
+      gain.gain.exponentialRampToValueAtTime(0.3, now + i * 0.18 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.18 + 0.3);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(now + i * 0.18);
+      osc.stop(now + i * 0.18 + 0.3);
+    });
+  }
+
+  updateSoundButton();
+
+  // --- Tempo real via Socket.IO ---
+  const socket = io();
+  const connectionDot = document.getElementById('connection-dot');
+
+  socket.on('connect', () => {
+    socket.emit('join', SLUG);
+    connectionDot.style.color = 'var(--success)';
+  });
+
+  socket.on('disconnect', () => {
+    connectionDot.style.color = 'var(--danger)';
+  });
+
+  socket.on('new-order', (data) => {
+    playNewOrderSound();
+    showToast(`Novo pedido recebido! #${data.order_id} - ${data.customer_name}`);
+    loadOrders();
+  });
+
+  socket.on('order-updated', () => {
+    loadOrders();
+  });
+
   loadOrders();
-  setInterval(loadOrders, 15000);
+  setInterval(loadOrders, 30000);
 </script>
 </body>
 </html>

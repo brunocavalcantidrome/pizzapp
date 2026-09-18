@@ -1,6 +1,8 @@
 require('dotenv').config();
 const path = require('path');
+const http = require('http');
 const express = require('express');
+const { Server } = require('socket.io');
 const mysql = require('mysql2/promise');
 
 const app = express();
@@ -10,6 +12,19 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
+
+const server = http.createServer(app);
+const io = new Server(server);
+
+// Cada painel de pedidos entra numa "sala" com o slug do estabelecimento,
+// assim eventos de um restaurante nao vazam para o painel de outro.
+io.on('connection', (socket) => {
+  socket.on('join', (slug) => {
+    if (typeof slug === 'string' && slug) {
+      socket.join(slug);
+    }
+  });
+});
 
 const PORT = process.env.PORT || 3000;
 
@@ -408,6 +423,13 @@ app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
     // 4. CONFIRMA A TRANSAÇÃO
     await connection.commit();
 
+    // Avisa o painel de pedidos (se estiver aberto) que chegou pedido novo
+    io.to(req.params.slug).emit('new-order', {
+      order_id: orderId,
+      customer_name,
+      total_amount: totalAmount
+    });
+
     res.status(201).json({
       message: 'Pedido realizado com sucesso!',
       order_id: orderId,
@@ -531,10 +553,15 @@ app.put('/api/orders/:slug/:orderId/status', adminAuth, tenantMiddleware, async 
     );
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({ 
-        error: 'Pedido não encontrado ou não pertence a este estabelecimento.' 
+      return res.status(404).json({
+        error: 'Pedido não encontrado ou não pertence a este estabelecimento.'
       });
     }
+
+    io.to(req.params.slug).emit('order-updated', {
+      order_id: Number(orderId),
+      status
+    });
 
     res.json({
       message: 'Status do pedido atualizado com sucesso!',
@@ -548,6 +575,6 @@ app.put('/api/orders/:slug/:orderId/status', adminAuth, tenantMiddleware, async 
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando em http://0.0.0.0:${PORT}`);
 });
