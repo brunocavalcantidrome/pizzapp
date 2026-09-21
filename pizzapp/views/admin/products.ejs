@@ -23,13 +23,34 @@
               <th>Nome</th>
               <th>Preço</th>
               <th>Disponível</th>
+              <th>Montável</th>
               <th></th>
             </tr>
           </thead>
           <tbody id="products-body">
-            <tr><td colspan="4" class="empty">Carregando...</td></tr>
+            <tr><td colspan="5" class="empty">Carregando...</td></tr>
           </tbody>
         </table>
+      </div>
+
+      <div class="card">
+        <h2>Montar produto (grupos e opções)</h2>
+        <p style="font-size:0.85rem;color:var(--muted)">Ex: Massa (1-1), Molho (1-1), Extras (0-3). Preço final = base + adicionais.</p>
+        <label>Produto</label>
+        <select id="builder-product"></select>
+        <div id="builder-groups"><p class="empty">Selecione um produto montável.</p></div>
+
+        <h3 style="margin-top:16px;">Novo grupo</h3>
+        <form id="group-form">
+          <label>Nome do grupo (ex: Massa)</label>
+          <input type="text" id="g_name" required>
+          <div class="builder-row">
+            <div style="flex:1;"><label>Mínimo</label><input type="number" id="g_min" min="0" value="1" required></div>
+            <div style="flex:1;"><label>Máximo</label><input type="number" id="g_max" min="1" value="1" required></div>
+          </div>
+          <div id="group-error" class="msg-error"></div>
+          <button type="submit" style="width:100%;">Criar grupo</button>
+        </form>
       </div>
     </section>
 
@@ -43,8 +64,10 @@
           <label>Descrição</label>
           <textarea id="p_description" rows="2"></textarea>
 
-          <label>Preço (R$)</label>
+          <label>Preço base (R$)</label>
           <input type="number" id="p_price" step="0.01" min="0" required>
+
+          <label><input type="checkbox" id="p_custom" style="width:auto;"> Produto montável (com opções)</label>
 
           <div id="product-error" class="msg-error"></div>
           <button type="submit" style="width:100%;">Adicionar produto</button>
@@ -58,6 +81,7 @@
 
 <script>
   const SLUG = '<%= restaurant.slug %>';
+  let allProducts = [];
 
   function showToast(msg) {
     const t = document.getElementById('toast');
@@ -67,34 +91,39 @@
   }
 
   function fmt(v) { return 'R$ ' + Number(v).toFixed(2); }
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   async function loadProducts() {
     const res = await fetch(`/api/products/${SLUG}`);
     const data = await res.json();
     const body = document.getElementById('products-body');
+    const sel = document.getElementById('builder-product');
     body.innerHTML = '';
+    sel.innerHTML = '';
 
-    if (!data.products || data.products.length === 0) {
-      body.innerHTML = '<tr><td colspan="4" class="empty">Nenhum produto cadastrado.</td></tr>';
+    allProducts = data.products || [];
+    if (allProducts.length === 0) {
+      body.innerHTML = '<tr><td colspan="5" class="empty">Nenhum produto cadastrado.</td></tr>';
       return;
     }
 
-    data.products.forEach(p => {
+    allProducts.forEach(p => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${p.name}<br><small>${p.description || ''}</small></td>
-        <td>${fmt(p.price)}</td>
-        <td>
-          <button class="small ${p.is_available ? '' : 'secondary'}" onclick="toggleAvailability(${p.id}, ${!p.is_available})">
-            ${p.is_available ? 'Disponível' : 'Indisponível'}
-          </button>
-        </td>
-        <td>
-          <button class="small danger" onclick="removeProduct(${p.id})">Excluir</button>
-        </td>
-      `;
+      tr.innerHTML =
+        `<td>${esc(p.name)}<br><small>${esc(p.description || '')}</small></td>` +
+        `<td>${fmt(p.price)}</td>` +
+        `<td><button class="small ${p.is_available ? '' : 'secondary'}" onclick="toggleAvailability(${p.id}, ${!p.is_available})">${p.is_available ? 'Disponível' : 'Indisponível'}</button></td>` +
+        `<td><button class="small ${p.is_customizable ? '' : 'secondary'}" onclick="toggleCustom(${p.id}, ${!p.is_customizable})">${p.is_customizable ? 'Sim' : 'Não'}</button></td>` +
+        `<td><button class="small danger" onclick="removeProduct(${p.id})">Excluir</button></td>`;
       body.appendChild(tr);
+
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name + (p.is_customizable ? ' (montável)' : '');
+      sel.appendChild(opt);
     });
+
+    if (sel.value) loadBuilderGroups();
   }
 
   async function toggleAvailability(id, newValue) {
@@ -102,6 +131,15 @@
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_available: newValue })
+    });
+    loadProducts();
+  }
+
+  async function toggleCustom(id, newValue) {
+    await fetch(`/api/products/${SLUG}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_customizable: newValue })
     });
     loadProducts();
   }
@@ -126,7 +164,8 @@
     const payload = {
       name: document.getElementById('p_name').value,
       description: document.getElementById('p_description').value,
-      price: document.getElementById('p_price').value
+      price: document.getElementById('p_price').value,
+      is_customizable: document.getElementById('p_custom').checked
     };
 
     try {
@@ -147,6 +186,106 @@
       errorEl.textContent = 'Erro de conexão';
     }
   });
+
+  // ---- Builder admin ----
+  document.getElementById('builder-product').addEventListener('change', loadBuilderGroups);
+
+  async function loadBuilderGroups() {
+    const pid = document.getElementById('builder-product').value;
+    const box = document.getElementById('builder-groups');
+    if (!pid) { box.innerHTML = ''; return; }
+    box.innerHTML = '<p class="empty">Carregando...</p>';
+    const res = await fetch(`/api/builder/${SLUG}/${pid}/admin`);
+    const data = await res.json();
+    box.innerHTML = '';
+    if (!data.groups || data.groups.length === 0) {
+      box.innerHTML = '<p class="empty">Nenhum grupo. Crie o primeiro abaixo.</p>';
+      return;
+    }
+    data.groups.forEach(g => {
+      const div = document.createElement('div');
+      div.className = 'builder-group';
+      div.innerHTML =
+        `<h3>${esc(g.name)} <small>(${g.min_required}-${g.max_allowed})</small> ` +
+        `<button class="small danger" onclick="removeGroup(${g.id})">x</button></h3>` +
+        (g.options || []).map(o =>
+          `<div class="builder-option"><span style="margin:0;color:var(--text);font-weight:400;">${esc(o.name)} · ${fmt(o.extra_price)} · ${o.is_available ? 'on' : 'off'}</span>` +
+          `<span><button class="small secondary" onclick="toggleOption(${o.id}, ${!o.is_available})">${o.is_available ? 'Pausar' : 'Ativar'}</button> ` +
+          `<button class="small danger" onclick="removeOption(${o.id})">x</button></span></div>`
+        ).join('') +
+        `<form onsubmit="return createOption(event, ${g.id})" class="builder-row" style="margin-top:8px;">` +
+        `<input type="text" id="opt_name_${g.id}" placeholder="Nova opção (ex: Bacon)" required style="flex:2;">` +
+        `<input type="number" id="opt_price_${g.id}" placeholder="+R$" step="0.01" min="0" value="0" style="flex:1;">` +
+        `<button class="small" type="submit">+</button></form>`;
+      box.appendChild(div);
+    });
+  }
+
+  document.getElementById('group-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('group-error');
+    errorEl.textContent = '';
+    const pid = document.getElementById('builder-product').value;
+    if (!pid) { errorEl.textContent = 'Selecione um produto.'; return; }
+    const payload = {
+      product_id: Number(pid),
+      name: document.getElementById('g_name').value,
+      min_required: Number(document.getElementById('g_min').value),
+      max_allowed: Number(document.getElementById('g_max').value)
+    };
+    const res = await fetch(`/api/builder/${SLUG}/groups`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) { errorEl.textContent = data.error || 'Erro'; return; }
+    showToast('Grupo criado');
+    document.getElementById('group-form').reset();
+    document.getElementById('g_min').value = 1;
+    document.getElementById('g_max').value = 1;
+    loadProducts().then(() => {
+      document.getElementById('builder-product').value = pid;
+      loadBuilderGroups();
+    });
+  });
+
+  async function createOption(e, groupId) {
+    e.preventDefault();
+    const name = document.getElementById('opt_name_' + groupId).value;
+    const extra = document.getElementById('opt_price_' + groupId).value || 0;
+    const res = await fetch(`/api/builder/${SLUG}/groups/${groupId}/options`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, extra_price: Number(extra) })
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.error || 'Erro'); return false; }
+    showToast('Opção criada');
+    loadBuilderGroups();
+    return false;
+  }
+
+  async function removeGroup(groupId) {
+    if (!confirm('Excluir grupo e todas as opções?')) return;
+    await fetch(`/api/builder/${SLUG}/groups/${groupId}`, { method: 'DELETE' });
+    loadBuilderGroups();
+  }
+
+  async function removeOption(optionId) {
+    if (!confirm('Excluir opção?')) return;
+    await fetch(`/api/builder/${SLUG}/options/${optionId}`, { method: 'DELETE' });
+    loadBuilderGroups();
+  }
+
+  async function toggleOption(optionId, newValue) {
+    await fetch(`/api/builder/${SLUG}/options/${optionId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_available: newValue })
+    });
+    loadBuilderGroups();
+  }
 
   loadProducts();
 </script>

@@ -5,6 +5,8 @@
     "express": "^5.2.1",
     "htop": "^1.0.1",
     "mysql2": "^3.24.4",
-    "socket.io": "^4.8.3"
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.8.3",
+    "whatsapp-web.js": "^1.34.7"
   }
 }

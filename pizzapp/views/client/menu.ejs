@@ -16,12 +16,16 @@
           <% products.forEach(function(p) { %>
             <div class="product">
               <div class="product-info">
-                <h3><%= p.name %></h3>
+                <h3><%= p.name %> <% if (p.is_customizable) { %><span class="badge-build">Monte o seu</span><% } %></h3>
                 <p><%= p.description || '' %></p>
               </div>
               <div style="display:flex; align-items:center;">
                 <span class="product-price">R$ <%= Number(p.price).toFixed(2) %></span>
-                <button onclick="addToCart(<%= p.id %>, '<%= p.name.replace(/'/g, "\\'") %>', <%= p.price %>)">Adicionar</button>
+                <% if (p.is_customizable) { %>
+                  <button onclick="openBuilder(<%= p.id %>)">Montar</button>
+                <% } else { %>
+                  <button onclick="addToCart(<%= p.id %>, '<%= p.name.replace(/'/g, "\\'") %>', <%= p.price %>)">Adicionar</button>
+                <% } %>
               </div>
             </div>
           <% }); %>
@@ -75,11 +79,29 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- Modal Montar -->
+<div class="builder-overlay" id="builder-overlay" style="display:none;">
+  <div class="builder-modal">
+    <div class="builder-header">
+      <h2 id="builder-title">Montar</h2>
+      <button class="small secondary" onclick="closeBuilder()">Fechar</button>
+    </div>
+    <p class="builder-base" id="builder-base"></p>
+    <div id="builder-groups"></div>
+    <div class="builder-footer">
+      <span id="builder-total">R$ 0.00</span>
+      <button id="builder-confirm" onclick="confirmBuilder()" disabled>Adicionar ao pedido</button>
+    </div>
+    <div id="builder-error" class="msg-error"></div>
+  </div>
+</div>
+
 <script>
   const SLUG = '<%= restaurant.slug %>';
   const cart = new Map();
 
   function fmt(v) { return 'R$ ' + Number(v).toFixed(2); }
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
   function showToast(msg) {
     const t = document.getElementById('toast');
@@ -88,24 +110,30 @@
     setTimeout(() => t.classList.remove('show'), 1800);
   }
 
+  function cartKey(id, optionIds) {
+    const sorted = [...(optionIds || [])].map(Number).sort((a, b) => a - b);
+    return id + '::' + sorted.join(',');
+  }
+
   function addToCart(id, name, price) {
-    const item = cart.get(id) || { id, name, price, quantity: 0 };
+    const key = cartKey(id, []);
+    const item = cart.get(key) || { key, id, name, price: Number(price), quantity: 0, option_ids: [], option_labels: [] };
     item.quantity += 1;
-    cart.set(id, item);
+    cart.set(key, item);
     renderCart();
     showToast(name + ' adicionado');
   }
 
-  function removeFromCart(id) {
-    cart.delete(id);
+  function removeFromCart(key) {
+    cart.delete(key);
     renderCart();
   }
 
-  function changeQty(id, delta) {
-    const item = cart.get(id);
+  function changeQty(key, delta) {
+    const item = cart.get(key);
     if (!item) return;
     item.quantity += delta;
-    if (item.quantity <= 0) cart.delete(id);
+    if (item.quantity <= 0) cart.delete(key);
     renderCart();
   }
 
@@ -122,15 +150,16 @@
       checkoutCard.style.display = 'block';
       cart.forEach(item => {
         const div = document.createElement('div');
-        div.className = 'cart-item';
-        div.innerHTML = `
-          <span>${item.quantity}x ${item.name}</span>
-          <span>
-            ${fmt(item.price * item.quantity)}
-            <button class="small secondary" onclick="changeQty(${item.id}, -1)">-</button>
-            <button class="small secondary" onclick="changeQty(${item.id}, 1)">+</button>
-            <button class="small danger" onclick="removeFromCart(${item.id})">x</button>
-          </span>`;
+        div.className = 'cart-item-builder';
+        const opts = (item.option_labels && item.option_labels.length)
+          ? `<br><small>${esc(item.option_labels.join(', '))}</small>`
+          : '';
+        div.innerHTML =
+          `<div><strong>${item.quantity}x ${esc(item.name)}</strong>${opts}<br><small>${fmt(item.price)} un.</small></div>` +
+          `<div style="white-space:nowrap;">${fmt(item.price * item.quantity)} ` +
+          `<button class="small secondary" data-k="${esc(item.key)}" onclick="changeQty(decodeURIComponent('${encodeURIComponent(item.key)}'), -1)">-</button> ` +
+          `<button class="small secondary" data-k="${esc(item.key)}" onclick="changeQty(decodeURIComponent('${encodeURIComponent(item.key)}'), 1)">+</button> ` +
+          `<button class="small danger" onclick="removeFromCart(decodeURIComponent('${encodeURIComponent(item.key)}'))">x</button></div>`;
         container.appendChild(div);
       });
     }
@@ -138,6 +167,142 @@
     const total = Array.from(cart.values()).reduce((sum, i) => sum + i.price * i.quantity, 0);
     document.getElementById('cart-total').textContent = fmt(total);
   }
+
+  // ---- Builder ----
+  let builderState = null;
+
+  async function openBuilder(productId) {
+    document.getElementById('builder-overlay').style.display = 'flex';
+    document.getElementById('builder-groups').innerHTML = '<p class="empty">Carregando opções...</p>';
+    document.getElementById('builder-error').textContent = '';
+    try {
+      const res = await fetch(`/api/builder/${SLUG}/${productId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao carregar');
+      builderState = {
+        product: data.product,
+        groups: data.groups || [],
+        selected: new Map()
+      };
+      document.getElementById('builder-title').textContent = 'Montar: ' + data.product.name;
+      document.getElementById('builder-base').textContent =
+        'Base ' + fmt(data.product.price) + ' + adicionais por opção';
+      renderBuilder();
+    } catch (err) {
+      document.getElementById('builder-groups').innerHTML = '';
+      document.getElementById('builder-error').textContent = err.message;
+    }
+  }
+
+  function closeBuilder() {
+    document.getElementById('builder-overlay').style.display = 'none';
+    builderState = null;
+  }
+
+  function renderBuilder() {
+    const box = document.getElementById('builder-groups');
+    box.innerHTML = '';
+    if (!builderState.groups.length) {
+      box.innerHTML = '<p class="empty">Nenhuma opção cadastrada ainda.</p>';
+      return;
+    }
+    builderState.groups.forEach(g => {
+      const sel = builderState.selected.get(g.id) || new Set();
+      const isSingle = Number(g.max_allowed) === 1;
+      const gdiv = document.createElement('div');
+      gdiv.className = 'builder-group';
+      gdiv.innerHTML =
+        `<h3>${esc(g.name)} <small>(${sel.size}/${g.max_allowed}${g.min_required > 0 ? ', mín ' + g.min_required : ''})</small></h3>` +
+        (g.description ? `<p class="builder-desc">${esc(g.description)}</p>` : '') +
+        g.options.map(o => {
+          const checked = sel.has(o.id) ? 'checked' : '';
+          const extra = Number(o.extra_price) > 0 ? ' +' + fmt(o.extra_price) : ' incluso';
+          return `<label class="builder-option"><input type="${isSingle ? 'radio' : 'checkbox'}" name="g_${g.id}" ${checked} onchange="toggleOption(${g.id}, ${o.id})"> ${esc(o.name)}<span>${extra}</span></label>`;
+        }).join('');
+      box.appendChild(gdiv);
+    });
+    updateBuilderTotal();
+  }
+
+  function toggleOption(groupId, optionId) {
+    const g = builderState.groups.find(x => x.id === groupId);
+    if (!g) return;
+    let sel = builderState.selected.get(groupId) || new Set();
+    if (Number(g.max_allowed) === 1) {
+      sel = new Set([optionId]);
+    } else {
+      if (sel.has(optionId)) {
+        sel.delete(optionId);
+      } else {
+        if (sel.size >= Number(g.max_allowed)) {
+          showToast(`Máximo ${g.max_allowed} em ${g.name}`);
+          renderBuilder();
+          return;
+        }
+        sel.add(optionId);
+      }
+    }
+    builderState.selected.set(groupId, sel);
+    renderBuilder();
+  }
+
+  function builderSelection() {
+    const optionIds = [];
+    const labels = [];
+    let extras = 0;
+    builderState.groups.forEach(g => {
+      const sel = builderState.selected.get(g.id) || new Set();
+      sel.forEach(oid => {
+        const opt = g.options.find(o => o.id === oid);
+        if (opt) {
+          optionIds.push(opt.id);
+          labels.push(opt.name);
+          extras += Number(opt.extra_price);
+        }
+      });
+    });
+    return { optionIds, labels, extras };
+  }
+
+  function updateBuilderTotal() {
+    const { extras } = builderSelection();
+    const total = Number(builderState.product.price) + extras;
+    document.getElementById('builder-total').textContent = fmt(total);
+    let ok = true;
+    let missing = '';
+    builderState.groups.forEach(g => {
+      const sel = builderState.selected.get(g.id) || new Set();
+      if (sel.size < Number(g.min_required) || sel.size > Number(g.max_allowed)) {
+        ok = false;
+        if (sel.size < Number(g.min_required)) missing = `"${g.name}": escolha pelo menos ${g.min_required}`;
+      }
+    });
+    document.getElementById('builder-confirm').disabled = !ok;
+    document.getElementById('builder-error').textContent = ok ? '' : missing;
+  }
+
+  function confirmBuilder() {
+    if (!builderState) return;
+    const { optionIds, labels, extras } = builderSelection();
+    const unit = Number(builderState.product.price) + extras;
+    const key = cartKey(builderState.product.id, optionIds);
+    const item = cart.get(key) || {
+      key, id: builderState.product.id, name: builderState.product.name,
+      price: unit, quantity: 0, option_ids: optionIds, option_labels: labels
+    };
+    item.quantity += 1;
+    item.price = unit;
+    item.option_ids = optionIds;
+    item.option_labels = labels;
+    cart.set(key, item);
+    closeBuilder();
+    renderCart();
+    showToast(builderState ? 'Montado adicionado' : 'Adicionado');
+  }
+
+  document.getElementById('builder-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'builder-overlay') closeBuilder();
+  });
 
   document.getElementById('checkout-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -149,7 +314,7 @@
       customer_phone: document.getElementById('customer_phone').value,
       delivery_address: document.getElementById('delivery_address').value,
       payment_method: document.getElementById('payment_method').value,
-      items: Array.from(cart.values()).map(i => ({ product_id: i.id, quantity: i.quantity }))
+      items: Array.from(cart.values()).map(i => ({ product_id: i.id, quantity: i.quantity, option_ids: i.option_ids || [] }))
     };
 
     try {

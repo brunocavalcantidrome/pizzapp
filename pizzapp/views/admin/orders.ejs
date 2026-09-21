@@ -10,6 +10,7 @@
     <nav>
       <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
       <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
+      <a href="/<%= restaurant.slug %>/admin/whatsapp">WhatsApp</a>
     </nav>
     <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
       <button type="button" class="secondary small" id="sound-toggle" onclick="toggleSound()">🔔 Ativar som</button>
@@ -93,7 +94,13 @@
     }
 
     data.orders.forEach(order => {
-      const itemsText = order.items.map(i => `${i.quantity}x ${i.product_name}`).join(', ');
+      const itemsText = order.items.map(i => {
+        const base = `${i.quantity}x ${i.product_name}`;
+        const opts = (i.selected_options && i.selected_options.length)
+          ? ` (${i.selected_options.map(o => o.option_name).join(', ')})`
+          : '';
+        return base + opts;
+      }).join(', ');
       const options = STATUSES.map(s =>
         `<option value="${s}" ${s === order.status ? 'selected' : ''}>${STATUS_LABELS[s]}</option>`
       ).join('');
