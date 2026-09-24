@@ -1,0 +1,87 @@
+<%- include('../partials/head', { title: restaurant.name + ' - Loja' }) %>
+
+<header class="topbar">
+  <h1>Painel · <%= restaurant.name %></h1>
+  <a href="/<%= restaurant.slug %>" target="_blank">Ver cardápio ↗</a>
+</header>
+
+<main>
+  <div class="toolbar">
+    <nav>
+      <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
+      <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
+      <a href="/<%= restaurant.slug %>/admin/categorias">Categorias</a>
+      <a href="/<%= restaurant.slug %>/admin/clientes">Clientes</a>
+      <a href="/<%= restaurant.slug %>/admin/loja">Loja</a>
+    </nav>
+  </div>
+
+  <div class="grid">
+    <section>
+      <div class="card">
+        <h2>Identidade no cardápio</h2>
+        <p><strong><%= restaurant.name %></strong> · /<%= restaurant.slug %> · 📱 <%= restaurant.whatsapp || 'sem WhatsApp' %></p>
+        <p class="empty">Nome, slug e WhatsApp são editados pelo admin do sistema.</p>
+
+        <h3 style="margin-top:16px;">Logo</h3>
+        <div id="logo-current"><% if (restaurant.logo_url) { %><img src="<%= restaurant.logo_url %>" style="width:96px;height:96px;object-fit:cover;border-radius:16px;"><% } else { %><p class="empty">Sem logo (aparece 🍕).</p><% } %></div>
+        <div class="builder-row" style="margin-top:8px;">
+          <input type="file" id="logo-file" accept="image/jpeg,image/png,image/webp" style="flex:2;">
+          <button class="small" onclick="saveImage('logo')">Enviar logo</button>
+        </div>
+
+        <h3 style="margin-top:16px;">Capa</h3>
+        <div id="cover-current"><% if (restaurant.cover_url) { %><img src="<%= restaurant.cover_url %>" style="width:100%;max-height:160px;object-fit:cover;border-radius:12px;"><% } else { %><p class="empty">Sem capa (aparece o degradê padrão).</p><% } %></div>
+        <div class="builder-row" style="margin-top:8px;">
+          <input type="file" id="cover-file" accept="image/jpeg,image/png,image/webp" style="flex:2;">
+          <button class="small" onclick="saveImage('cover')">Enviar capa</button>
+        </div>
+
+        <div id="store-error" class="msg-error" style="margin-top:8px;"></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const SLUG = '<%= restaurant.slug %>';
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  async function saveImage(kind) {
+    const errorEl = document.getElementById('store-error');
+    errorEl.textContent = '';
+    const file = document.getElementById(kind + '-file').files[0];
+    if (!file) { errorEl.textContent = 'Escolha um arquivo primeiro.'; return; }
+
+    try {
+      const fd = new FormData();
+      fd.append('image', file);
+      const upRes = await fetch(`/api/uploads/${SLUG}/image`, { method: 'POST', body: fd });
+      const upData = await upRes.json();
+      if (!upRes.ok) { errorEl.textContent = upData.error || 'Erro ao enviar imagem'; return; }
+
+      const payload = kind === 'logo' ? { logo_url: upData.url } : { cover_url: upData.url };
+      const res = await fetch(`/api/settings/${SLUG}/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) { errorEl.textContent = data.error || 'Erro ao salvar'; return; }
+      showToast('Imagem atualizada! Recarregando...');
+      setTimeout(() => location.reload(), 900);
+    } catch (err) {
+      errorEl.textContent = 'Erro de conexão';
+    }
+  }
+</script>
+</body>
+</html>

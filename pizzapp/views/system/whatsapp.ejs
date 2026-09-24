@@ -1,0 +1,113 @@
+<%- include('../partials/head', { title: 'WhatsApp - Administração do Sistema' }) %>
+
+<header class="topbar">
+  <h1>Administração do Sistema</h1>
+  <nav>
+    <a href="/sistema/admin">Estabelecimentos</a>
+    <a href="/sistema/admin/clientes">Clientes</a>
+    <a href="/sistema/admin/whatsapp">WhatsApp</a>
+  </nav>
+</header>
+
+<main>
+  <div class="grid">
+    <section>
+      <div class="card" style="max-width: 560px;">
+        <h2>Conexão (conta única)</h2>
+        <p>Esta é a conta que fala com os <strong>clientes de todas as lojas</strong> e envia o aviso de pedido novo para o WhatsApp de cada loja.</p>
+        <p id="wa-status" class="empty">Verificando status...</p>
+        <div id="wa-qr-wrap" style="display:none; margin-top:16px;">
+          <p>Escaneie com o celular responsável (WhatsApp → Aparelhos conectados):</p>
+          <div id="wa-qr"></div>
+          <p><small>QR atualiza automaticamente. Após conectar, esta página mostra "Conectado".</small></p>
+        </div>
+        <p id="wa-ok" style="display:none;" class="msg-success">✅ WhatsApp conectado e pronto.</p>
+      </div>
+    </section>
+
+    <aside>
+      <div class="card">
+        <h2>Destinos das lojas</h2>
+        <p><small>Aviso de pedido novo vai para o WhatsApp cadastrado de cada loja.</small></p>
+        <table>
+          <thead>
+            <tr><th>Loja</th><th>WhatsApp</th></tr>
+          </thead>
+          <tbody id="stores-body">
+            <tr><td colspan="2" class="empty">Carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  async function refreshStatus() {
+    try {
+      const res = await fetch('/api/sistema/whatsapp/status');
+      const s = await res.json();
+      const el = document.getElementById('wa-status');
+      const ok = document.getElementById('wa-ok');
+      const qrWrap = document.getElementById('wa-qr-wrap');
+
+      if (s.connected) {
+        el.textContent = `Conectado${s.number ? ' (+' + s.number + ')' : ''}`;
+        ok.style.display = 'block';
+        qrWrap.style.display = 'none';
+      } else if (s.hasQR) {
+        el.textContent = 'Aguardando leitura do QR Code...';
+        ok.style.display = 'none';
+        qrWrap.style.display = 'block';
+        await refreshQR();
+      } else {
+        el.textContent = 'Inicializando WhatsApp... aguarde alguns segundos.';
+        ok.style.display = 'none';
+      }
+    } catch (e) {
+      document.getElementById('wa-status').textContent = 'Erro ao consultar status.';
+    }
+  }
+
+  async function refreshQR() {
+    try {
+      const res = await fetch('/api/sistema/whatsapp/qr');
+      if (!res.ok) return;
+      const { qr } = await res.json();
+      const box = document.getElementById('wa-qr');
+      box.innerHTML = '';
+      new QRCode(box, { text: qr, width: 256, height: 256 });
+    } catch (e) { /* mantém QR anterior */ }
+  }
+
+  async function loadStores() {
+    try {
+      const res = await fetch('/api/sistema/restaurants');
+      const data = await res.json();
+      const body = document.getElementById('stores-body');
+      body.innerHTML = '';
+      (data.restaurants || []).forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${esc(r.name)}<br><small>${esc(r.slug)}</small></td><td>${esc(r.whatsapp || '⚠️ não cadastrado')}</td>`;
+        body.appendChild(tr);
+      });
+    } catch (e) {
+      document.getElementById('stores-body').innerHTML = '<tr><td colspan="2" class="empty">Erro ao carregar.</td></tr>';
+    }
+  }
+
+  const socket = io();
+  socket.on('whatsapp-qr', () => refreshStatus());
+  socket.on('whatsapp-ready', () => refreshStatus());
+  socket.on('whatsapp-disconnected', () => refreshStatus());
+
+  refreshStatus();
+  loadStores();
+  setInterval(refreshStatus, 5000);
+</script>
+</body>
+</html>

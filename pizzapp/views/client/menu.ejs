@@ -1,81 +1,120 @@
 <%- include('../partials/head', { title: restaurant.name + ' - Cardápio' }) %>
+<style>
+  .menu-wrap { max-width: 720px; margin: 0 auto; padding-bottom: 96px; }
+  .menu-cover { height: 150px; background: linear-gradient(135deg, #7a0e14, #EA1D2C 60%, #FF6D00);
+    background-size: cover; background-position: center; }
+  .menu-store { background: #fff; border-bottom: 1px solid #E0E0E0; padding: 0 16px 14px;
+    position: relative; z-index: 1; }
+  .menu-store-row { display: flex; gap: 12px; align-items: flex-end; margin-top: -28px; }
+  .menu-logo { width: 72px; height: 72px; border-radius: 16px; background: #fff; border: 3px solid #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 38px; overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  .menu-logo img { width: 100%; height: 100%; object-fit: cover; }
+  .menu-store h1 { font-size: 1.25em; }
+  .menu-store .city { color: #5F6368; font-size: .85em; }
+  .menu-badges { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; font-size: .8em; }
+  .menu-badge { border: 1px solid #E0E0E0; border-radius: 999px; padding: 4px 10px; background: #fff; }
+  .menu-badge.open { color: #10B981; border-color: #10B981; font-weight: 700; }
+  .menu-search { padding: 12px 16px 0; position: sticky; top: 0; background: #F8F9FA; z-index: 5; }
+  .menu-search input { width: 100%; padding: 11px 14px; border-radius: 12px; border: 1px solid #E0E0E0; font-size: 1em; }
+  .category-nav { overflow-x: auto; padding: 10px 16px; }
+  .category-nav-list { display: flex; gap: 8px; list-style: none; }
+  .category-nav-link { white-space: nowrap; border: 1px solid #E0E0E0; background: #fff; color: #111827;
+    border-radius: 999px; padding: 8px 14px; font-size: .9em; cursor: pointer; }
+  .category-nav-link small { color: #5F6368; }
+  .category-nav-link.is-active { background: #111827; color: #fff; border-color: #111827; }
+  .category-nav-link.is-active small { color: #ddd; }
+  .category-title { padding: 14px 16px 8px; font-size: 1.1em; }
+  .products-grid { display: flex; flex-direction: column; gap: 10px; padding: 0 16px; }
+  .regular-product-card { background: #fff; border: 1px solid #E0E0E0; border-radius: 14px;
+    padding: 12px; position: relative; cursor: pointer; }
+  .regular-product-layout { display: flex; gap: 12px; }
+  .product-image-container { width: 86px; height: 86px; flex-shrink: 0; }
+  .regular-product-image { width: 100%; height: 100%; border-radius: 10px; background: #f1f1f1;
+    display: flex; align-items: center; justify-content: center; font-size: 34px; overflow: hidden; }
+  .regular-product-image img { width: 100%; height: 100%; object-fit: cover; }
+  .regular-product-content { flex: 1; min-width: 0; }
+  .regular-product-name { font-weight: 700; }
+  .tag-build { font-size: .68em; background: #fff3e0; color: #c25700; border-radius: 6px; padding: 2px 6px; margin-left: 6px; }
+  .regular-product-description { color: #5F6368; font-size: .85em; margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .regular-product-price { margin-top: 6px; font-weight: 700; }
+  .unavailable { font-size: .72em; color: #EA1D2C; font-weight: 700; }
+  .product-add-cta { position: absolute; right: 12px; bottom: 12px; width: 32px; height: 32px;
+    border-radius: 50%; background: #EA1D2C; color: #fff; display: flex;
+    align-items: center; justify-content: center; font-size: 20px; line-height: 1; }
+  .regular-product-card.is-off { opacity: .65; cursor: default; }
+  .menu-cart-aside { padding: 0 16px; margin-top: 16px; }
+</style>
 
-<header class="topbar">
-  <h1><%= restaurant.name %></h1>
-  <span>📱 <%= restaurant.whatsapp %></span>
-</header>
+<div class="menu-wrap">
 
-<main>
-  <div class="grid">
-    <section>
-      <div class="card">
-        <h2>Cardápio</h2>
-        <% if (products.length === 0) { %>
-          <p class="empty">Nenhum produto disponível no momento.</p>
-        <% } else { %>
-          <% products.forEach(function(p) { %>
-            <div class="product">
-              <div class="product-info">
-                <h3><%= p.name %> <% if (p.is_customizable) { %><span class="badge-build">Monte o seu</span><% } %></h3>
-                <p><%= p.description || '' %></p>
-              </div>
-              <div style="display:flex; align-items:center;">
-                <span class="product-price">R$ <%= Number(p.price).toFixed(2) %></span>
-                <% if (p.is_customizable) { %>
-                  <button onclick="openBuilder(<%= p.id %>)">Montar</button>
-                <% } else { %>
-                  <button onclick="addToCart(<%= p.id %>, '<%= p.name.replace(/'/g, "\\'") %>', <%= p.price %>)">Adicionar</button>
-                <% } %>
-              </div>
-            </div>
-          <% }); %>
-        <% } %>
+  <div class="menu-cover" <% if (restaurant.cover_url) { %>style="background-image:url('<%= restaurant.cover_url %>')"<% } %>></div>
+  <div class="menu-store">
+    <div class="menu-store-row">
+      <div class="menu-logo"><% if (restaurant.logo_url) { %><img src="<%= restaurant.logo_url %>" alt="Logo"><% } else { %>🍕<% } %></div>
+      <div>
+        <h1><%= restaurant.name %></h1>
+        <div class="city">📱 <%= restaurant.whatsapp %></div>
       </div>
-    </section>
-
-    <aside>
-      <div class="card">
-        <h2>Seu Pedido</h2>
-        <div id="cart-items">
-          <p class="empty" id="cart-empty">Carrinho vazio</p>
-        </div>
-        <div class="cart-total">
-          <span>Total</span>
-          <span id="cart-total">R$ 0.00</span>
-        </div>
-      </div>
-
-      <div class="card" id="checkout-card" style="display:none;">
-        <h2>Finalizar Pedido</h2>
-        <form id="checkout-form">
-          <label>Nome</label>
-          <input type="text" id="customer_name" required>
-
-          <label>Telefone</label>
-          <input type="text" id="customer_phone" required>
-
-          <label>Endereço de entrega</label>
-          <textarea id="delivery_address" rows="2" required></textarea>
-
-          <label>Forma de pagamento</label>
-          <select id="payment_method">
-            <option value="dinheiro">Dinheiro</option>
-            <option value="cartao">Cartão</option>
-            <option value="pix">Pix</option>
-          </select>
-
-          <div id="order-error" class="msg-error"></div>
-          <button type="submit" style="width:100%;">Confirmar Pedido</button>
-        </form>
-      </div>
-
-      <div class="card" id="success-card" style="display:none;">
-        <h2>Pedido realizado! 🎉</h2>
-        <p id="success-message" class="msg-success"></p>
-      </div>
-    </aside>
+    </div>
+    <div class="menu-badges">
+      <span class="menu-badge open">● Aberto agora</span>
+    </div>
   </div>
-</main>
+
+  <div class="menu-search">
+    <input id="menu-search" type="text" placeholder="Buscar no cardápio..." oninput="onMenuSearch()">
+  </div>
+
+  <nav class="category-nav">
+    <ul class="category-nav-list" id="menu-chips"></ul>
+  </nav>
+
+  <div id="menu-sections"></div>
+
+  <div class="menu-cart-aside">
+    <div class="card">
+      <h2>Seu Pedido</h2>
+      <div id="cart-items">
+        <p class="empty" id="cart-empty">Carrinho vazio</p>
+      </div>
+      <div class="cart-total">
+        <span>Total</span>
+        <span id="cart-total">R$ 0.00</span>
+      </div>
+    </div>
+
+    <div class="card" id="checkout-card" style="display:none;">
+      <h2>Finalizar Pedido</h2>
+      <form id="checkout-form">
+        <label>Nome</label>
+        <input type="text" id="customer_name" required>
+
+        <label>Telefone (WhatsApp)</label>
+        <input type="tel" id="customer_phone" placeholder="(71) 98730-1606" inputmode="tel" autocomplete="tel" required>
+
+        <label>Endereço de entrega</label>
+        <textarea id="delivery_address" rows="2" required></textarea>
+
+        <label>Forma de pagamento</label>
+        <select id="payment_method">
+          <option value="dinheiro">Dinheiro</option>
+          <option value="cartao">Cartão</option>
+          <option value="pix">Pix</option>
+        </select>
+
+        <div id="order-error" class="msg-error"></div>
+        <button type="submit" style="width:100%;">Confirmar Pedido</button>
+      </form>
+    </div>
+
+    <div class="card" id="success-card" style="display:none;">
+      <h2>Pedido realizado! 🎉</h2>
+      <p id="success-message" class="msg-success"></p>
+    </div>
+  </div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -98,16 +137,86 @@
 
 <script>
   const SLUG = '<%= restaurant.slug %>';
+  const CATEGORIES = <%- JSON.stringify(categories).replace(/</g, '\\u003c') %>;
+  const PRODUCTS = <%- JSON.stringify(products).replace(/</g, '\\u003c') %>;
   const cart = new Map();
+  let menuCat = null, menuQuery = '';
 
   function fmt(v) { return 'R$ ' + Number(v).toFixed(2); }
-  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
   function showToast(msg) {
     const t = document.getElementById('toast');
     t.textContent = msg;
     t.classList.add('show');
     setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  // ---- Cardápio por categorias (estilo referência) ----
+  function onMenuSearch() {
+    menuQuery = document.getElementById('menu-search').value.toLowerCase();
+    renderMenu();
+  }
+
+  function selMenuCat(id) {
+    menuCat = (id === null || id === undefined) ? null : Number(id);
+    renderMenu();
+  }
+
+  function productImage(p) {
+    if (p.image_url) return `<img src="${esc(p.image_url)}" alt="" loading="lazy">`;
+    return '🍽';
+  }
+
+  function productCard(p) {
+    const off = !Number(p.is_available);
+    const price = Number(p.is_customizable) ? `a partir de ${fmt(p.price)}` : fmt(p.price);
+    const action = off
+      ? ''
+      : (Number(p.is_customizable) ? `openBuilder(${p.id})` : `addToCart(${p.id}, '${esc(p.name).replace(/'/g, "\\'")}', ${Number(p.price)})`);
+    return `<div class="regular-product-card ${off ? 'is-off' : ''}" ${action ? `onclick="${action}"` : ''}>
+      <div class="regular-product-layout">
+        <div class="product-image-container"><div class="regular-product-image">${productImage(p)}</div></div>
+        <div class="regular-product-content">
+          <div class="regular-product-name">${esc(p.name)}${Number(p.is_customizable) ? '<span class="tag-build">Monte o seu</span>' : ''}</div>
+          ${p.description ? `<div class="regular-product-description">${esc(p.description)}</div>` : ''}
+          <div class="regular-product-price">${off ? '<span class="unavailable">Indisponível</span> · ' : ''}${price}</div>
+        </div>
+      </div>
+      ${off ? '' : '<span class="product-add-cta">+</span>'}
+    </div>`;
+  }
+
+  function renderMenu() {
+    const chips = document.getElementById('menu-chips');
+    const box = document.getElementById('menu-sections');
+    const q = menuQuery;
+
+    const matchQ = (p) => ((p.name || '') + ' ' + (p.description || '')).toLowerCase().includes(q);
+
+    const total = PRODUCTS.filter(matchQ).length;
+    let h = `<li><button class="category-nav-link ${menuCat === null ? 'is-active' : ''}" onclick="selMenuCat(null)">Cardápio completo <small>${total}</small></button></li>`;
+    CATEGORIES.forEach(c => {
+      const n = PRODUCTS.filter(p => Number(p.category_id) === Number(c.id) && matchQ(p)).length;
+      h += `<li><button class="category-nav-link ${menuCat === Number(c.id) ? 'is-active' : ''}" onclick="selMenuCat(${c.id})">${esc(c.name)} <small>${n}</small></button></li>`;
+    });
+    chips.innerHTML = h;
+
+    box.innerHTML = '';
+    const groups = [...CATEGORIES.map(c => ({ id: Number(c.id), name: c.name }))];
+    if (PRODUCTS.some(p => !p.category_id && matchQ(p))) groups.push({ id: null, name: 'Outros' });
+
+    groups.forEach(g => {
+      if (menuCat !== null && g.id !== menuCat) return;
+      const items = PRODUCTS.filter(p =>
+        (g.id === null ? !p.category_id : Number(p.category_id) === g.id) && matchQ(p)
+      );
+      if (!items.length) return;
+      box.innerHTML += `<h2 class="category-title">${esc(g.name)}</h2><div class="products-grid">` +
+        items.map(productCard).join('') + `</div>`;
+    });
+
+    if (!box.innerHTML) box.innerHTML = '<p class="empty" style="padding:16px;">Nenhum resultado. Tente outras palavras.</p>';
   }
 
   function cartKey(id, optionIds) {
@@ -304,14 +413,41 @@
     if (e.target.id === 'builder-overlay') closeBuilder();
   });
 
+  // ---- Máscara de telefone BR ----
+  function maskPhone(value) {
+    let d = value.replace(/\D/g, '');
+    if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
+    d = d.slice(0, 11);
+    if (!d.length) return '';
+    if (d.length <= 2) return `(${d}`;
+    if (d.length <= 6) return `(${d.slice(0, 2)}) ${d.slice(2)}`;
+    if (d.length <= 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+    return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  }
+
+  function validPhone(value) {
+    const d = value.replace(/\D/g, '');
+    return d.length === 10 || d.length === 11;
+  }
+
+  document.getElementById('customer_phone').addEventListener('input', (e) => {
+    e.target.value = maskPhone(e.target.value);
+  });
+
   document.getElementById('checkout-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const errorEl = document.getElementById('order-error');
     errorEl.textContent = '';
 
+    const phoneVal = document.getElementById('customer_phone').value;
+    if (!validPhone(phoneVal)) {
+      errorEl.textContent = 'Informe um telefone válido com DDD, ex: (71) 98730-1606.';
+      return;
+    }
+
     const payload = {
       customer_name: document.getElementById('customer_name').value,
-      customer_phone: document.getElementById('customer_phone').value,
+      customer_phone: phoneVal,
       delivery_address: document.getElementById('delivery_address').value,
       payment_method: document.getElementById('payment_method').value,
       items: Array.from(cart.values()).map(i => ({ product_id: i.id, quantity: i.quantity, option_ids: i.option_ids || [] }))
@@ -333,7 +469,7 @@
       document.getElementById('checkout-card').style.display = 'none';
       document.getElementById('success-card').style.display = 'block';
       document.getElementById('success-message').textContent =
-        `Pedido #${data.order_id} confirmado. Total: ${fmt(data.total_amount)}. Acompanhe pelo WhatsApp da loja.`;
+        `Pedido #${data.order_id} confirmado. Total: ${fmt(data.total_amount)}. Acompanhe pelo seu WhatsApp.`;
       cart.clear();
       renderCart();
     } catch (err) {
@@ -341,6 +477,7 @@
     }
   });
 
+  renderMenu();
   renderCart();
 </script>
 </body>

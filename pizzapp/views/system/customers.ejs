@@ -1,0 +1,88 @@
+<%- include('../partials/head', { title: 'Clientes - Administração do Sistema' }) %>
+
+<header class="topbar">
+  <h1>Administração do Sistema</h1>
+  <nav>
+    <a href="/sistema/admin">Estabelecimentos</a>
+    <a href="/sistema/admin/clientes">Clientes</a>
+    <a href="/sistema/admin/whatsapp">WhatsApp</a>
+  </nav>
+</header>
+
+<main>
+  <div class="toolbar">
+    <div style="display:flex; align-items:center; gap:12px;">
+      <input type="text" id="search" placeholder="Buscar nome, telefone ou loja..." oninput="applyFilter()" style="min-width:280px;">
+    </div>
+    <span id="summary" class="empty"></span>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Loja</th>
+          <th>Nome</th>
+          <th>Telefone</th>
+          <th>Pedidos</th>
+          <th>Total gasto</th>
+          <th>Última compra</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="customers-body">
+        <tr><td colspan="7" class="empty">Carregando...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  let allCustomers = [];
+
+  function fmt(v) { return 'R$ ' + Number(v).toFixed(2); }
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function fmtDate(d) { return d ? new Date(d).toLocaleString('pt-BR') : '-'; }
+
+  async function loadCustomers() {
+    const res = await fetch('/api/sistema/customers');
+    const data = await res.json();
+    allCustomers = data.customers || [];
+    document.getElementById('summary').textContent =
+      `${data.total_customers || 0} clientes em ${(data.total_restaurants || 0)} lojas`;
+    applyFilter();
+  }
+
+  function applyFilter() {
+    const q = document.getElementById('search').value.toLowerCase();
+    const rows = allCustomers.filter(c =>
+      (c.name || '').toLowerCase().includes(q) ||
+      (c.phone || '').includes(q) ||
+      (c.restaurant_name || '').toLowerCase().includes(q)
+    );
+    const body = document.getElementById('customers-body');
+    body.innerHTML = '';
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="7" class="empty">Nenhum cliente encontrado.</td></tr>';
+      return;
+    }
+    rows.forEach(c => {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        `<td>${esc(c.restaurant_name)}<br><small>${esc(c.restaurant_slug)}</small></td>` +
+        `<td>${esc(c.name)}</td>` +
+        `<td>${esc(c.phone)}</td>` +
+        `<td>${c.total_orders}</td>` +
+        `<td>${fmt(c.total_spent)}</td>` +
+        `<td>${fmtDate(c.last_order_at)}</td>` +
+        `<td><a href="https://wa.me/${esc(c.phone)}" target="_blank">💬 WhatsApp</a></td>`;
+      body.appendChild(tr);
+    });
+  }
+
+  loadCustomers();
+</script>
+</body>
+</html>

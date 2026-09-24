@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 .wwebjs_auth/
 .wwebjs_cache/
+public/uploads/*
+!public/uploads/.gitkeep

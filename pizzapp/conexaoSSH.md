@@ -4,8 +4,8 @@ This document describes everything needed to connect to the production EC2 insta
 
 ## 1. Server identity
 
-- **Public IP:** `54.160.160.180`
-- **Public DNS:** `ec2-54-160-160-180.compute-1.amazonaws.com`
+- **Public IP:** `54.90.105.131` (anterior: `54.160.160.180` — mudou no resize para 2GB em 2026-09-21; sem Elastic IP, stop/start troca o IP)
+- **Public DNS:** `ec2-54-90-105-131.compute-1.amazonaws.com`
 - **Region:** `us-east-1` (N. Virginia)
 - **OS:** Amazon Linux (SSH user: `ec2-user`)
 - **App port:** `3000` (HTTP, not HTTPS — there is no reverse proxy/TLS in front of it yet)
@@ -28,7 +28,7 @@ chmod 400 "/Users/brunocavalcanti/Desktop/Pizzapp/pizzapp.pem"
 Connect with:
 
 ```bash
-ssh -i "/Users/brunocavalcanti/Desktop/Pizzapp/pizzapp.pem" -o BatchMode=yes ec2-user@54.160.160.180
+ssh -i "/Users/brunocavalcanti/Desktop/Pizzapp/pizzapp.pem" -o BatchMode=yes ec2-user@54.90.105.131
 ```
 
 `-o BatchMode=yes` makes it fail fast instead of hanging if the key doesn't work (useful for non-interactive/scripted sessions).
@@ -52,7 +52,7 @@ Common gotcha: Instance Connect can fail with "Error establishing SSH connection
 
 ```bash
 scp -i "/Users/brunocavalcanti/Desktop/Pizzapp/pizzapp.pem" -o BatchMode=yes \
-  /local/path/to/file ec2-user@54.160.160.180:/tmp/
+  /local/path/to/file ec2-user@54.90.105.131:/tmp/
 ```
 
 Files are typically staged in `/tmp/` first (writable by `ec2-user`), then moved into place with `sudo` because the app directory is owned by `root` (see section 4).
@@ -70,10 +70,10 @@ Files are typically staged in `/tmp/` first (writable by `ec2-user`), then moved
 KEY="/Users/brunocavalcanti/Desktop/Pizzapp/pizzapp.pem"
 
 # 1. Copy updated file(s) to /tmp on the server
-scp -i "$KEY" -o BatchMode=yes /local/path/server.js ec2-user@54.160.160.180:/tmp/
+scp -i "$KEY" -o BatchMode=yes /local/path/server.js ec2-user@54.90.105.131:/tmp/
 
 # 2. Move into place as root, keep a timestamped backup of the previous version
-ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 "
+ssh -i "$KEY" -o BatchMode=yes ec2-user@54.90.105.131 "
   sudo cp /home/ec2-user/pizzapp/server.js /home/ec2-user/pizzapp/server.js.bak-\$(date +%s)
   sudo cp /tmp/server.js /home/ec2-user/pizzapp/server.js
   sudo chown root:root /home/ec2-user/pizzapp/server.js
@@ -81,13 +81,13 @@ ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 "
 "
 
 # 3. Restart the running process (see PM2 section below)
-ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 "sudo -i bash -c 'pm2 restart pizzapp'"
+ssh -i "$KEY" -o BatchMode=yes ec2-user@54.90.105.131 "sudo -i bash -c 'pm2 restart pizzapp'"
 ```
 
 If `package.json`/`package-lock.json` changed (new npm dependency), also run on the server:
 
 ```bash
-ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 "sudo -i bash -c 'cd /home/ec2-user/pizzapp && npm install --omit=dev'"
+ssh -i "$KEY" -o BatchMode=yes ec2-user@54.90.105.131 "sudo -i bash -c 'cd /home/ec2-user/pizzapp && npm install --omit=dev'"
 ```
 
 ## 5. Node / npm / PM2 — the PATH quirk
@@ -134,7 +134,7 @@ sudo -i bash -c 'pm2 save'                 # persist current process list
 Check it's running:
 
 ```bash
-ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 "sudo systemctl status mariadb --no-pager"
+ssh -i "$KEY" -o BatchMode=yes ec2-user@54.90.105.131 "sudo systemctl status mariadb --no-pager"
 ```
 
 ### Running a query safely (without ever printing the password)
@@ -142,7 +142,7 @@ ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 "sudo systemctl status ma
 The credentials live in `/home/ec2-user/pizzapp/.env` (`DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`). **Never `cat` that file or echo its contents** — source it into environment variables inside the remote shell instead, so the password never appears in any terminal output or log:
 
 ```bash
-ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 '
+ssh -i "$KEY" -o BatchMode=yes ec2-user@54.90.105.131 '
   sudo bash -c "
     set -a
     source /home/ec2-user/pizzapp/.env
@@ -155,7 +155,7 @@ ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 '
 To just confirm which env vars exist without ever exposing values:
 
 ```bash
-ssh -i "$KEY" -o BatchMode=yes ec2-user@54.160.160.180 "sudo grep -o '^[A-Z_]*=' /home/ec2-user/pizzapp/.env"
+ssh -i "$KEY" -o BatchMode=yes ec2-user@54.90.105.131 "sudo grep -o '^[A-Z_]*=' /home/ec2-user/pizzapp/.env"
 ```
 
 ### Schema (as of this writing)
@@ -182,9 +182,9 @@ A template with empty values is committed at `pizzapp/.env.example` — use it a
 ## 9. Quick health checks after any deploy
 
 ```bash
-curl -s http://54.160.160.180:3000/health
-curl -s -o /dev/null -w "%{http_code}\n" http://54.160.160.180:3000/<some-restaurant-slug>
-curl -s -o /dev/null -w "%{http_code}\n" http://54.160.160.180:3000/socket.io/socket.io.js
+curl -s http://54.90.105.131:3000/health
+curl -s -o /dev/null -w "%{http_code}\n" http://54.90.105.131:3000/<some-restaurant-slug>
+curl -s -o /dev/null -w "%{http_code}\n" http://54.90.105.131:3000/socket.io/socket.io.js
 ```
 
 `/health` should return `{"status":"OK","db_time":"..."}`. A restaurant slug page should return `200` if the restaurant exists and is active, or a `404` JSON error otherwise.

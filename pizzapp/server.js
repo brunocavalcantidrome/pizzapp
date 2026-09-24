@@ -4,12 +4,19 @@ const http = require('http');
 const express = require('express');
 const { Server } = require('socket.io');
 const mysql = require('mysql2/promise');
+const fs = require('fs');
+const multer = require('multer');
 const {
   initWhatsApp,
   getStatus: getWhatsAppStatus,
   getLastQR,
+  normalizeBRPhone,
+  isValidBRPhone,
   buildOrderMessage,
-  sendOrderToRestaurant
+  sendOrderToRestaurant,
+  buildCustomerOrderMessage,
+  buildCustomerStatusMessage,
+  sendCustomerMessage
 } = require('./whatsapp');
 
 const app = express();
@@ -37,7 +44,7 @@ io.on('connection', (socket) => {
 // Se falhar (ex: sem Chrome), o servidor segue funcionando sem notificação via WhatsApp.
 initWhatsApp(io);
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 80;
 
 // Fábrica de middlewares de autenticação básica (um para o painel do lojista, outro para o admin do sistema)
 function basicAuth(userEnvVar, passEnvVar, realm) {
@@ -93,7 +100,7 @@ async function tenantMiddleware(req, res, next) {
 
   try {
     const [rows] = await pool.query(
-      'SELECT id, name, slug, whatsapp, is_active, notification_sound FROM restaurants WHERE slug = ?',
+      'SELECT id, name, slug, whatsapp, is_active, notification_sound, logo_url, cover_url FROM restaurants WHERE slug = ?',
       [slug]
     );
 
@@ -109,6 +116,120 @@ async function tenantMiddleware(req, res, next) {
     res.status(500).json({ error: 'Erro interno ao identificar estabelecimento.' });
   }
 }
+
+// ===== Uploads de imagem (logo/capa da loja, foto do produto) =====
+// Arquivos em public/uploads/<slug>/, servidos pelo express.static.
+const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = path.join(UPLOAD_DIR, req.params.slug);
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = (path.extname(file.originalname) || '.jpg').toLowerCase();
+    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (/^image\/(jpeg|png|webp)$/.test(file.mimetype)) cb(null, true);
+    else cb(new Error('Envie uma imagem JPG, PNG ou WEBP de até 2MB.'));
+  }
+});
+
+app.post('/api/uploads/:slug/image', adminAuth, tenantMiddleware, (req, res) => {
+  upload.single('image')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'Nenhuma imagem enviada.' });
+    res.status(201).json({ url: `/uploads/${req.params.slug}/${req.file.filename}` });
+  });
+});
+
+// ===== Categorias de produtos (ex: Pizzas, Calzones, Bebidas) =====
+
+app.get('/api/categories/:slug', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const [categories] = await pool.query(
+      'SELECT id, name, sort_order FROM categories WHERE restaurant_id = ? ORDER BY sort_order, id',
+      [req.restaurant.id]
+    );
+    res.json({ categories });
+  } catch (err) {
+    console.error('Erro ao listar categorias:', err);
+    res.status(500).json({ error: 'Erro ao listar categorias.' });
+  }
+});
+
+app.post('/api/categories/:slug', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const { name, sort_order } = req.body;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: 'Nome da categoria é obrigatório.' });
+    }
+    const [result] = await pool.query(
+      'INSERT INTO categories (restaurant_id, name, sort_order) VALUES (?, ?, ?)',
+      [req.restaurant.id, String(name).trim(), Number(sort_order || 0)]
+    );
+    res.status(201).json({ message: 'Categoria criada!', category_id: result.insertId });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Já existe uma categoria com esse nome.' });
+    }
+    console.error('Erro ao criar categoria:', err);
+    res.status(500).json({ error: 'Erro ao criar categoria.' });
+  }
+});
+
+app.put('/api/categories/:slug/:id', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const { name, sort_order } = req.body;
+    const fields = [];
+    const values = [];
+    if (name !== undefined) { fields.push('name = ?'); values.push(String(name).trim()); }
+    if (sort_order !== undefined) { fields.push('sort_order = ?'); values.push(Number(sort_order)); }
+    if (fields.length === 0) {
+      return res.status(400).json({ error: 'Nenhum campo para atualizar foi informado.' });
+    }
+    values.push(req.params.id, req.restaurant.id);
+    const [result] = await pool.query(
+      `UPDATE categories SET ${fields.join(', ')} WHERE id = ? AND restaurant_id = ?`,
+      values
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Categoria não encontrada.' });
+    }
+    res.json({ message: 'Categoria atualizada!' });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Já existe uma categoria com esse nome.' });
+    }
+    console.error('Erro ao atualizar categoria:', err);
+    res.status(500).json({ error: 'Erro ao atualizar categoria.' });
+  }
+});
+
+// Excluir categoria: produtos vinculados ficam sem categoria ("Outros" no cardápio)
+app.delete('/api/categories/:slug/:id', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const [result] = await pool.query(
+      'DELETE FROM categories WHERE id = ? AND restaurant_id = ?',
+      [req.params.id, req.restaurant.id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Categoria não encontrada.' });
+    }
+    res.json({ message: 'Categoria excluída!' });
+  } catch (err) {
+    console.error('Erro ao excluir categoria:', err);
+    res.status(500).json({ error: 'Erro ao excluir categoria.' });
+  }
+});
 
 // Rota pública para buscar dados da loja e seu cardápio
 // Inclui flag is_customizable + grupos/opções dos montáveis para o builder do cliente
@@ -143,8 +264,15 @@ app.get('/api/menu/:slug', tenantMiddleware, async (req, res) => {
   try {
     const restaurantId = req.restaurant.id;
 
+    const [categories] = await pool.query(
+      'SELECT id, name, sort_order FROM categories WHERE restaurant_id = ? ORDER BY sort_order, id',
+      [restaurantId]
+    );
+
     const [products] = await pool.query(
-      'SELECT id, name, description, price, is_customizable FROM products WHERE restaurant_id = ? AND is_available = TRUE',
+      `SELECT p.id, p.name, p.description, p.price, p.is_available, p.is_customizable,
+              p.category_id, p.image_url
+       FROM products p WHERE p.restaurant_id = ? ORDER BY p.name`,
       [restaurantId]
     );
 
@@ -156,6 +284,7 @@ app.get('/api/menu/:slug', tenantMiddleware, async (req, res) => {
 
     res.json({
       restaurant: req.restaurant,
+      categories,
       products: productsWithBuilder
     });
   } catch (err) {
@@ -168,7 +297,10 @@ app.get('/api/menu/:slug', tenantMiddleware, async (req, res) => {
 app.get('/api/products/:slug', adminAuth, tenantMiddleware, async (req, res) => {
   try {
     const [products] = await pool.query(
-      'SELECT id, name, description, price, is_available, is_customizable FROM products WHERE restaurant_id = ? ORDER BY name',
+      `SELECT p.id, p.name, p.description, p.price, p.is_available, p.is_customizable,
+              p.category_id, p.image_url, c.name AS category_name
+       FROM products p LEFT JOIN categories c ON c.id = p.category_id
+       WHERE p.restaurant_id = ? ORDER BY p.name`,
       [req.restaurant.id]
     );
     res.json({ restaurant: req.restaurant.name, products });
@@ -181,15 +313,27 @@ app.get('/api/products/:slug', adminAuth, tenantMiddleware, async (req, res) => 
 // Rota (admin) para criar um novo produto
 app.post('/api/products/:slug', adminAuth, tenantMiddleware, async (req, res) => {
   try {
-    const { name, description, price, is_customizable } = req.body;
+    const { name, description, price, is_customizable, category_id, image_url } = req.body;
 
     if (!name || price === undefined || price === null || isNaN(Number(price))) {
       return res.status(400).json({ error: 'Nome e preço válido são obrigatórios.' });
     }
 
+    let categoryId = null;
+    if (category_id !== undefined && category_id !== null && category_id !== '') {
+      const [catRows] = await pool.query(
+        'SELECT id FROM categories WHERE id = ? AND restaurant_id = ?',
+        [category_id, req.restaurant.id]
+      );
+      if (catRows.length === 0) {
+        return res.status(400).json({ error: 'Categoria não encontrada neste estabelecimento.' });
+      }
+      categoryId = catRows[0].id;
+    }
+
     const [result] = await pool.query(
-      'INSERT INTO products (restaurant_id, name, description, price, is_available, is_customizable) VALUES (?, ?, ?, ?, TRUE, ?)',
-      [req.restaurant.id, name, description || null, Number(price), is_customizable ? 1 : 0]
+      'INSERT INTO products (restaurant_id, name, description, price, is_available, is_customizable, category_id, image_url) VALUES (?, ?, ?, ?, TRUE, ?, ?, ?)',
+      [req.restaurant.id, name, description || null, Number(price), is_customizable ? 1 : 0, categoryId, image_url || null]
     );
 
     res.status(201).json({ message: 'Produto criado com sucesso!', product_id: result.insertId });
@@ -199,11 +343,11 @@ app.post('/api/products/:slug', adminAuth, tenantMiddleware, async (req, res) =>
   }
 });
 
-// Rota (admin) para atualizar um produto (nome, descrição, preço, disponibilidade)
+// Rota (admin) para atualizar um produto (nome, descrição, preço, disponibilidade, categoria, imagem)
 app.put('/api/products/:slug/:productId', adminAuth, tenantMiddleware, async (req, res) => {
   try {
     const { productId } = req.params;
-    const { name, description, price, is_available, is_customizable } = req.body;
+    const { name, description, price, is_available, is_customizable, category_id, image_url } = req.body;
 
     const fields = [];
     const values = [];
@@ -213,6 +357,21 @@ app.put('/api/products/:slug/:productId', adminAuth, tenantMiddleware, async (re
     if (price !== undefined) { fields.push('price = ?'); values.push(Number(price)); }
     if (is_available !== undefined) { fields.push('is_available = ?'); values.push(Boolean(is_available)); }
     if (is_customizable !== undefined) { fields.push('is_customizable = ?'); values.push(is_customizable ? 1 : 0); }
+    if (category_id !== undefined) {
+      if (category_id === null || category_id === '') {
+        fields.push('category_id = ?'); values.push(null);
+      } else {
+        const [catRows] = await pool.query(
+          'SELECT id FROM categories WHERE id = ? AND restaurant_id = ?',
+          [category_id, req.restaurant.id]
+        );
+        if (catRows.length === 0) {
+          return res.status(400).json({ error: 'Categoria não encontrada neste estabelecimento.' });
+        }
+        fields.push('category_id = ?'); values.push(catRows[0].id);
+      }
+    }
+    if (image_url !== undefined) { fields.push('image_url = ?'); values.push(image_url || null); }
 
     if (fields.length === 0) {
       return res.status(400).json({ error: 'Nenhum campo para atualizar foi informado.' });
@@ -503,11 +662,11 @@ app.post('/api/sistema/restaurants', sysAdminAuth, async (req, res) => {
   }
 });
 
-// Rota (sistema) para editar um estabelecimento (nome, slug, whatsapp, status de funcionamento)
+// Rota (sistema) para editar um estabelecimento (nome, slug, whatsapp, status, logo, capa)
 app.put('/api/sistema/restaurants/:id', sysAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, slug, whatsapp, is_active } = req.body;
+    const { name, slug, whatsapp, is_active, logo_url, cover_url } = req.body;
 
     if (slug !== undefined) {
       const slugPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -523,6 +682,8 @@ app.put('/api/sistema/restaurants/:id', sysAdminAuth, async (req, res) => {
     if (slug !== undefined) { fields.push('slug = ?'); values.push(slug); }
     if (whatsapp !== undefined) { fields.push('whatsapp = ?'); values.push(whatsapp); }
     if (is_active !== undefined) { fields.push('is_active = ?'); values.push(Boolean(is_active)); }
+    if (logo_url !== undefined) { fields.push('logo_url = ?'); values.push(logo_url || null); }
+    if (cover_url !== undefined) { fields.push('cover_url = ?'); values.push(cover_url || null); }
 
     if (fields.length === 0) {
       return res.status(400).json({ error: 'Nenhum campo para atualizar foi informado.' });
@@ -572,6 +733,34 @@ app.get('/sistema/admin', sysAdminAuth, (req, res) => {
   res.render('system/restaurants');
 });
 
+// API (sistema): todos os clientes de todas as lojas
+app.get('/api/sistema/customers', sysAdminAuth, async (req, res) => {
+  try {
+    const [customers] = await pool.query(
+      `SELECT c.id, c.name, c.phone, c.total_orders, c.total_spent, c.first_order_at, c.last_order_at,
+              r.id AS restaurant_id, r.name AS restaurant_name, r.slug AS restaurant_slug
+       FROM customers c JOIN restaurants r ON r.id = c.restaurant_id
+       ORDER BY c.total_orders DESC, c.last_order_at DESC`
+    );
+    const [counts] = await pool.query(
+      'SELECT COUNT(DISTINCT restaurant_id) AS total_restaurants FROM customers'
+    );
+    res.json({
+      total_customers: customers.length,
+      total_restaurants: counts[0].total_restaurants,
+      customers
+    });
+  } catch (err) {
+    console.error('Erro ao listar todos os clientes:', err);
+    res.status(500).json({ error: 'Erro ao buscar clientes.' });
+  }
+});
+
+// Página (sistema): todos os clientes de todas as lojas
+app.get('/sistema/admin/clientes', sysAdminAuth, (req, res) => {
+  res.render('system/customers');
+});
+
 // Teste de Saúde / Conexão
 // Precisa vir antes de '/:slug': como esse padrão casa qualquer segmento
 // unico da URL, se ficasse depois o Express tentaria tratar "health"
@@ -588,12 +777,18 @@ app.get('/health', async (req, res) => {
 // Rota pública: página do cardápio para o cliente fazer pedidos
 app.get('/:slug', tenantMiddleware, async (req, res) => {
   try {
-    const [products] = await pool.query(
-      'SELECT id, name, description, price, is_customizable FROM products WHERE restaurant_id = ? AND is_available = TRUE',
+    const [categories] = await pool.query(
+      'SELECT id, name, sort_order FROM categories WHERE restaurant_id = ? ORDER BY sort_order, id',
       [req.restaurant.id]
     );
 
-    res.render('client/menu', { restaurant: req.restaurant, products });
+    const [products] = await pool.query(
+      `SELECT id, name, description, price, is_available, is_customizable, category_id, image_url
+       FROM products WHERE restaurant_id = ? ORDER BY name`,
+      [req.restaurant.id]
+    );
+
+    res.render('client/menu', { restaurant: req.restaurant, categories, products });
   } catch (err) {
     console.error('Erro ao renderizar cardápio:', err);
     res.status(500).send('Erro ao carregar cardápio.');
@@ -610,6 +805,21 @@ app.get('/:slug/admin/produtos', adminAuth, tenantMiddleware, (req, res) => {
   res.render('admin/products', { restaurant: req.restaurant });
 });
 
+// Rota do painel administrativo: categorias
+app.get('/:slug/admin/categorias', adminAuth, tenantMiddleware, (req, res) => {
+  res.render('admin/categories', { restaurant: req.restaurant });
+});
+
+// Rota do painel administrativo: loja (logo, capa)
+app.get('/:slug/admin/loja', adminAuth, tenantMiddleware, (req, res) => {
+  res.render('admin/store', { restaurant: req.restaurant });
+});
+
+// Rota do painel administrativo: clientes (fidelização)
+app.get('/:slug/admin/clientes', adminAuth, tenantMiddleware, (req, res) => {
+  res.render('admin/customers', { restaurant: req.restaurant });
+});
+
 // Rota POST para receber o pedido do carrinho (Otimizada e Segura)
 // Suporta produtos montáveis: items[].option_ids (array de group_options.id)
 // Preço sempre recalculado no servidor: base + SUM(extra_price). Min/max validados.
@@ -619,6 +829,9 @@ app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
   // Validação inicial antes de solicitar conexão ao pool
   if (!items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'O carrinho não pode estar vazio.' });
+  }
+  if (!isValidBRPhone(customer_phone)) {
+    return res.status(400).json({ error: 'Informe um telefone válido com DDD.' });
   }
 
   const connection = await pool.getConnection();
@@ -781,6 +994,33 @@ app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
       );
     }
 
+    // 4b. CADASTRA/ATUALIZA O CLIENTE (fidelização: pertence ao restaurante, identifica pelo telefone)
+    const customerDigits = normalizeBRPhone(customer_phone);
+    let customerRegistered = false;
+    if (customerDigits) {
+      const [existing] = await connection.query(
+        'SELECT id FROM customers WHERE restaurant_id = ? AND phone = ?',
+        [restaurantId, customerDigits]
+      );
+      if (existing.length === 0) {
+        await connection.query(
+          `INSERT INTO customers (restaurant_id, name, phone, total_orders, total_spent, first_order_at, last_order_at)
+           VALUES (?, ?, ?, 1, ?, NOW(), NOW())`,
+          [restaurantId, customer_name, customerDigits, totalAmount]
+        );
+      } else {
+        await connection.query(
+          `UPDATE customers SET name = ?, total_orders = total_orders + 1,
+            total_spent = total_spent + ?, last_order_at = NOW()
+           WHERE restaurant_id = ? AND phone = ?`,
+          [customer_name, totalAmount, restaurantId, customerDigits]
+        );
+      }
+      customerRegistered = true;
+    } else {
+      console.warn('Cliente não cadastrado (telefone inválido):', customer_phone);
+    }
+
     // 5. CONFIRMA A TRANSAÇÃO
     await connection.commit();
 
@@ -824,13 +1064,44 @@ app.post('/api/orders/:slug', tenantMiddleware, async (req, res) => {
       console.error('Erro ao enviar pedido via WhatsApp:', wErr.message);
     }
 
+    // 6b. AVISA O CLIENTE (resumo do pedido + "analisando pedido")
+    let customerSent = false;
+    let customerError = null;
+    try {
+      if (customerDigits) {
+        const message = buildCustomerOrderMessage({
+          orderId,
+          restaurantName: req.restaurant.name,
+          customerName: customer_name,
+          items: validatedItems.map((v) => ({
+            name: v.product_name,
+            quantity: v.quantity,
+            subtotal: v.subtotal,
+            selected_options: v.selected_options
+          })),
+          total: totalAmount,
+          payment: payment_method
+        });
+        await sendCustomerMessage({ to: customerDigits, message });
+        customerSent = true;
+      } else {
+        customerError = 'Telefone do cliente inválido para WhatsApp.';
+      }
+    } catch (cErr) {
+      customerError = cErr.message;
+      console.error('Erro ao enviar WhatsApp ao cliente:', cErr.message);
+    }
+
     res.status(201).json({
       message: 'Pedido realizado com sucesso!',
       order_id: orderId,
       restaurant: req.restaurant.name,
       total_amount: totalAmount,
       whatsapp_sent: whatsappSent,
-      ...(whatsappError ? { whatsapp_error: whatsappError } : {})
+      ...(whatsappError ? { whatsapp_error: whatsappError } : {}),
+      customer_registered: customerRegistered,
+      customer_whatsapp_sent: customerSent,
+      ...(customerError ? { customer_whatsapp_error: customerError } : {})
     });
 
   } catch (err) {
@@ -974,15 +1245,93 @@ app.put('/api/orders/:slug/:orderId/status', adminAuth, tenantMiddleware, async 
       status
     });
 
+    // Avisa o cliente da loja no WhatsApp sobre o novo status
+    const [[orderInfo]] = await pool.query(
+      `SELECT o.customer_name, o.customer_phone, o.total_amount, r.name AS restaurant_name
+       FROM orders o JOIN restaurants r ON r.id = o.restaurant_id
+       WHERE o.id = ? AND o.restaurant_id = ?`,
+      [orderId, restaurantId]
+    );
+
+    let customerSent = false;
+    let customerError = null;
+    if (orderInfo && normalizeBRPhone(orderInfo.customer_phone)) {
+      try {
+        const message = buildCustomerStatusMessage({
+          orderId: Number(orderId),
+          restaurantName: orderInfo.restaurant_name,
+          status,
+          total: orderInfo.total_amount
+        });
+        await sendCustomerMessage({ to: orderInfo.customer_phone, message });
+        customerSent = true;
+      } catch (cErr) {
+        customerError = cErr.message;
+        console.error('Erro ao avisar cliente sobre status:', cErr.message);
+      }
+    } else {
+      customerError = 'Telefone do cliente inválido para WhatsApp.';
+    }
+
     res.json({
       message: 'Status do pedido atualizado com sucesso!',
       order_id: Number(orderId),
-      new_status: status
+      new_status: status,
+      customer_whatsapp_sent: customerSent,
+      ...(customerError ? { customer_whatsapp_error: customerError } : {})
     });
 
   } catch (err) {
     console.error('Erro ao atualizar status do pedido:', err);
     res.status(500).json({ error: 'Erro interno ao alterar status.' });
+  }
+});
+
+// Rota (admin) para listar os clientes da loja (fidelização: escopo do restaurante)
+app.get('/api/customers/:slug', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const [customers] = await pool.query(
+      `SELECT id, name, phone, total_orders, total_spent, first_order_at, last_order_at
+       FROM customers WHERE restaurant_id = ? ORDER BY total_orders DESC, last_order_at DESC`,
+      [req.restaurant.id]
+    );
+    res.json({
+      restaurant: req.restaurant.name,
+      total_customers: customers.length,
+      customers
+    });
+  } catch (err) {
+    console.error('Erro ao listar clientes:', err);
+    res.status(500).json({ error: 'Erro ao buscar clientes.' });
+  }
+});
+
+// Rota para o lojista atualizar logo e capa da sua loja
+app.put('/api/settings/:slug/profile', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const { logo_url, cover_url } = req.body;
+
+    for (const [label, url] of [['logo_url', logo_url], ['cover_url', cover_url]]) {
+      if (url !== undefined && url !== null && url !== '') {
+        if (typeof url !== 'string' || url.length > 255 || !/^(\/uploads\/|https?:\/\/)/.test(url)) {
+          return res.status(400).json({ error: `${label} inválida. Envie uma imagem pelo painel.` });
+        }
+      }
+    }
+
+    const fields = [];
+    const values = [];
+    if (logo_url !== undefined) { fields.push('logo_url = ?'); values.push(logo_url || null); }
+    if (cover_url !== undefined) { fields.push('cover_url = ?'); values.push(cover_url || null); }
+    if (fields.length === 0) {
+      return res.status(400).json({ error: 'Nenhum campo para atualizar foi informado.' });
+    }
+    values.push(req.restaurant.id);
+    await pool.query(`UPDATE restaurants SET ${fields.join(', ')} WHERE id = ?`, values);
+    res.json({ message: 'Perfil da loja atualizado!', logo_url: logo_url || null, cover_url: cover_url || null });
+  } catch (err) {
+    console.error('Erro ao atualizar perfil da loja:', err);
+    res.status(500).json({ error: 'Erro interno ao salvar perfil.' });
   }
 });
 
@@ -1009,19 +1358,15 @@ app.put('/api/settings/:slug/notification-sound', adminAuth, tenantMiddleware, a
   }
 });
 
-// ===== WhatsApp: status + QR + página de conexão (lojista) =====
+// ===== WhatsApp (conta única, gerenciada só pelo admin do sistema) =====
 
-// Status da conexão (para o painel mostrar "conectado" ou "aguardando QR")
-app.get('/api/whatsapp/:slug/status', adminAuth, tenantMiddleware, (req, res) => {
-  res.json({
-    restaurant: req.restaurant.name,
-    send_to: req.restaurant.whatsapp || null,
-    ...getWhatsAppStatus()
-  });
+// Status da conexão (conta única que atende todas as lojas)
+app.get('/api/sistema/whatsapp/status', sysAdminAuth, (req, res) => {
+  res.json(getWhatsAppStatus());
 });
 
 // QR Code atual (string). O front renderiza com biblioteca QR via CDN.
-app.get('/api/whatsapp/:slug/qr', adminAuth, tenantMiddleware, (req, res) => {
+app.get('/api/sistema/whatsapp/qr', sysAdminAuth, (req, res) => {
   const qr = getLastQR();
   if (!qr) {
     return res.status(404).json({ error: 'Nenhum QR disponível. Já conectado ou ainda inicializando.' });
@@ -1029,9 +1374,9 @@ app.get('/api/whatsapp/:slug/qr', adminAuth, tenantMiddleware, (req, res) => {
   res.json({ qr });
 });
 
-// Página do lojista para conectar o WhatsApp (escaneia o QR uma única vez)
-app.get('/:slug/admin/whatsapp', adminAuth, tenantMiddleware, (req, res) => {
-  res.render('admin/whatsapp', { restaurant: req.restaurant });
+// Página do admin do sistema para conectar o WhatsApp (escaneia o QR uma única vez)
+app.get('/sistema/admin/whatsapp', sysAdminAuth, (req, res) => {
+  res.render('system/whatsapp');
 });
 
 server.listen(PORT, '0.0.0.0', () => {

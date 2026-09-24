@@ -1,0 +1,96 @@
+<%- include('../partials/head', { title: restaurant.name + ' - Clientes' }) %>
+
+<header class="topbar">
+  <h1>Clientes · <%= restaurant.name %></h1>
+  <a href="/<%= restaurant.slug %>/admin">← Voltar aos pedidos</a>
+</header>
+
+<main>
+  <div class="toolbar">
+    <nav>
+      <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
+      <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
+      <a href="/<%= restaurant.slug %>/admin/categorias">Categorias</a>
+      <a href="/<%= restaurant.slug %>/admin/clientes">Clientes</a>
+      <a href="/<%= restaurant.slug %>/admin/loja">Loja</a>
+    </nav>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <input type="text" id="search" placeholder="Buscar nome ou telefone..." oninput="applyFilter()" style="min-width:260px;">
+    </div>
+  </div>
+
+  <div class="grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom:16px;">
+    <div class="card"><h2>Total de clientes</h2><p id="stat-total" style="font-size:1.6em;">-</p></div>
+    <div class="card"><h2>Pedidos (clientes)</h2><p id="stat-orders" style="font-size:1.6em;">-</p></div>
+    <div class="card"><h2>Receita (clientes)</h2><p id="stat-revenue" style="font-size:1.6em;">-</p></div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Nome</th>
+          <th>Telefone</th>
+          <th>Pedidos</th>
+          <th>Total gasto</th>
+          <th>Última compra</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="customers-body">
+        <tr><td colspan="6" class="empty">Carregando...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+  const SLUG = '<%= restaurant.slug %>';
+  let allCustomers = [];
+
+  function fmt(v) { return 'R$ ' + Number(v).toFixed(2); }
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function fmtDate(d) { return d ? new Date(d).toLocaleString('pt-BR') : '-'; }
+
+  async function loadCustomers() {
+    const res = await fetch(`/api/customers/${SLUG}`);
+    const data = await res.json();
+    allCustomers = data.customers || [];
+
+    const totalOrders = allCustomers.reduce((s, c) => s + Number(c.total_orders), 0);
+    const revenue = allCustomers.reduce((s, c) => s + Number(c.total_spent), 0);
+    document.getElementById('stat-total').textContent = allCustomers.length;
+    document.getElementById('stat-orders').textContent = totalOrders;
+    document.getElementById('stat-revenue').textContent = fmt(revenue);
+
+    applyFilter();
+  }
+
+  function applyFilter() {
+    const q = document.getElementById('search').value.toLowerCase();
+    const rows = allCustomers.filter(c =>
+      (c.name || '').toLowerCase().includes(q) || (c.phone || '').includes(q)
+    );
+    const body = document.getElementById('customers-body');
+    body.innerHTML = '';
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty">Nenhum cliente encontrado.</td></tr>';
+      return;
+    }
+    rows.forEach(c => {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        `<td>${esc(c.name)}</td>` +
+        `<td>${esc(c.phone)}</td>` +
+        `<td>${c.total_orders}</td>` +
+        `<td>${fmt(c.total_spent)}</td>` +
+        `<td>${fmtDate(c.last_order_at)}</td>` +
+        `<td><a href="https://wa.me/${esc(c.phone)}" target="_blank">💬 WhatsApp</a></td>`;
+      body.appendChild(tr);
+    });
+  }
+
+  loadCustomers();
+</script>
+</body>
+</html>

@@ -1,0 +1,143 @@
+<%- include('../partials/head', { title: restaurant.name + ' - Categorias' }) %>
+
+<header class="topbar">
+  <h1>Painel · <%= restaurant.name %></h1>
+  <a href="/<%= restaurant.slug %>" target="_blank">Ver cardápio ↗</a>
+</header>
+
+<main>
+  <div class="toolbar">
+    <nav>
+      <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
+      <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
+      <a href="/<%= restaurant.slug %>/admin/categorias">Categorias</a>
+      <a href="/<%= restaurant.slug %>/admin/clientes">Clientes</a>
+      <a href="/<%= restaurant.slug %>/admin/loja">Loja</a>
+    </nav>
+  </div>
+
+  <div class="grid">
+    <section>
+      <div class="card">
+        <h2>Categorias (ordem do cardápio)</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Ordem</th>
+              <th>Nome</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="categories-body">
+            <tr><td colspan="3" class="empty">Carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <aside>
+      <div class="card">
+        <h2>Nova Categoria</h2>
+        <form id="category-form">
+          <label>Nome (ex: Pizzas, Bebidas)</label>
+          <input type="text" id="c_name" required>
+
+          <label>Ordem</label>
+          <input type="number" id="c_order" value="0">
+
+          <div id="category-error" class="msg-error"></div>
+          <button type="submit" style="width:100%;">Criar categoria</button>
+        </form>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const SLUG = '<%= restaurant.slug %>';
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  async function loadCategories() {
+    const res = await fetch(`/api/categories/${SLUG}`);
+    const data = await res.json();
+    const body = document.getElementById('categories-body');
+    body.innerHTML = '';
+
+    if (!data.categories || data.categories.length === 0) {
+      body.innerHTML = '<tr><td colspan="3" class="empty">Nenhuma categoria. Crie a primeira ao lado.</td></tr>';
+      return;
+    }
+
+    data.categories.forEach(c => {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        `<td><input type="number" value="${c.sort_order}" onchange="changeOrder(${c.id}, this.value)" style="width:70px;"></td>` +
+        `<td><input type="text" value="${esc(c.name)}" onchange="renameCategory(${c.id}, this.value)"></td>` +
+        `<td><button class="small danger" onclick="removeCategory(${c.id})">Excluir</button></td>`;
+      body.appendChild(tr);
+    });
+  }
+
+  document.getElementById('category-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('category-error');
+    errorEl.textContent = '';
+    const res = await fetch(`/api/categories/${SLUG}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: document.getElementById('c_name').value,
+        sort_order: Number(document.getElementById('c_order').value || 0)
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) { errorEl.textContent = data.error || 'Erro'; return; }
+    showToast('Categoria criada');
+    document.getElementById('category-form').reset();
+    document.getElementById('c_order').value = 0;
+    loadCategories();
+  });
+
+  async function changeOrder(id, sortOrder) {
+    const res = await fetch(`/api/categories/${SLUG}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sort_order: Number(sortOrder) })
+    });
+    if (!res.ok) showToast('Erro ao salvar ordem');
+    loadCategories();
+  }
+
+  async function renameCategory(id, name) {
+    if (!name.trim()) { loadCategories(); return; }
+    const res = await fetch(`/api/categories/${SLUG}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.error || 'Erro ao renomear'); loadCategories(); return; }
+    showToast('Categoria atualizada');
+  }
+
+  async function removeCategory(id) {
+    if (!confirm('Excluir categoria? Os produtos dela ficam sem categoria.')) return;
+    await fetch(`/api/categories/${SLUG}/${id}`, { method: 'DELETE' });
+    showToast('Categoria excluída');
+    loadCategories();
+  }
+
+  loadCategories();
+</script>
+</body>
+</html>

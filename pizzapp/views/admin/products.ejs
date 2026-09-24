@@ -10,6 +10,9 @@
     <nav>
       <a href="/<%= restaurant.slug %>/admin">Pedidos</a>
       <a href="/<%= restaurant.slug %>/admin/produtos">Produtos</a>
+      <a href="/<%= restaurant.slug %>/admin/categorias">Categorias</a>
+      <a href="/<%= restaurant.slug %>/admin/clientes">Clientes</a>
+      <a href="/<%= restaurant.slug %>/admin/loja">Loja</a>
     </nav>
   </div>
 
@@ -20,7 +23,9 @@
         <table>
           <thead>
             <tr>
+              <th></th>
               <th>Nome</th>
+              <th>Categoria</th>
               <th>Preço</th>
               <th>Disponível</th>
               <th>Montável</th>
@@ -28,7 +33,7 @@
             </tr>
           </thead>
           <tbody id="products-body">
-            <tr><td colspan="5" class="empty">Carregando...</td></tr>
+            <tr><td colspan="7" class="empty">Carregando...</td></tr>
           </tbody>
         </table>
       </div>
@@ -67,6 +72,13 @@
           <label>Preço base (R$)</label>
           <input type="number" id="p_price" step="0.01" min="0" required>
 
+          <label>Categoria</label>
+          <select id="p_category"><option value="">Sem categoria</option></select>
+
+          <label>Foto</label>
+          <input type="file" id="p_image" accept="image/jpeg,image/png,image/webp">
+          <img id="p_preview" style="display:none; max-width:100%; border-radius:8px; margin-top:8px;">
+
           <label><input type="checkbox" id="p_custom" style="width:auto;"> Produto montável (com opções)</label>
 
           <div id="product-error" class="msg-error"></div>
@@ -82,6 +94,38 @@
 <script>
   const SLUG = '<%= restaurant.slug %>';
   let allProducts = [];
+  let allCategories = [];
+
+  async function uploadImage(file) {
+    const fd = new FormData();
+    fd.append('image', file);
+    const res = await fetch(`/api/uploads/${SLUG}/image`, { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erro ao enviar imagem');
+    return data.url;
+  }
+
+  async function loadCategories() {
+    const res = await fetch(`/api/categories/${SLUG}`);
+    const data = await res.json();
+    allCategories = data.categories || [];
+    const sel = document.getElementById('p_category');
+    sel.innerHTML = '<option value="">Sem categoria</option>';
+    allCategories.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      sel.appendChild(opt);
+    });
+  }
+
+  function categoryOptions(selectedId) {
+    let h = `<option value="">Sem categoria</option>`;
+    allCategories.forEach(c => {
+      h += `<option value="${c.id}" ${Number(selectedId) === Number(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`;
+    });
+    return h;
+  }
 
   function showToast(msg) {
     const t = document.getElementById('toast');
@@ -103,14 +147,18 @@
 
     allProducts = data.products || [];
     if (allProducts.length === 0) {
-      body.innerHTML = '<tr><td colspan="5" class="empty">Nenhum produto cadastrado.</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="empty">Nenhum produto cadastrado.</td></tr>';
       return;
     }
 
     allProducts.forEach(p => {
       const tr = document.createElement('tr');
       tr.innerHTML =
+        `<td>${p.image_url ? `<img src="${esc(p.image_url)}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;">` : '<span class="empty">sem foto</span>'}<br>` +
+        `<button class="small secondary" onclick="document.getElementById('photo_${p.id}').click()">${p.image_url ? 'Trocar foto' : 'Enviar foto'}</button>` +
+        `<input type="file" id="photo_${p.id}" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="changePhoto(${p.id}, this)"></td>` +
         `<td>${esc(p.name)}<br><small>${esc(p.description || '')}</small></td>` +
+        `<td><select onchange="changeCategory(${p.id}, this.value)">${categoryOptions(p.category_id)}</select></td>` +
         `<td>${fmt(p.price)}</td>` +
         `<td><button class="small ${p.is_available ? '' : 'secondary'}" onclick="toggleAvailability(${p.id}, ${!p.is_available})">${p.is_available ? 'Disponível' : 'Indisponível'}</button></td>` +
         `<td><button class="small ${p.is_customizable ? '' : 'secondary'}" onclick="toggleCustom(${p.id}, ${!p.is_customizable})">${p.is_customizable ? 'Sim' : 'Não'}</button></td>` +
@@ -156,19 +204,71 @@
     loadProducts();
   }
 
+  async function changePhoto(id, input) {
+    const file = input.files[0];
+    if (!file) return;
+    try {
+      showToast('Enviando foto...');
+      const url = await uploadImage(file);
+      const res = await fetch(`/api/products/${SLUG}/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_url: url })
+      });
+      const data = await res.json();
+      if (!res.ok) { showToast(data.error || 'Erro ao salvar foto'); return; }
+      showToast('Foto atualizada');
+      loadProducts();
+    } catch (err) {
+      showToast(err.message || 'Erro ao enviar foto');
+    }
+  }
+
+  async function changeCategory(id, categoryId) {    const res = await fetch(`/api/products/${SLUG}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category_id: categoryId === '' ? null : Number(categoryId) })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.error || 'Erro ao trocar categoria');
+      loadProducts();
+      return;
+    }
+    showToast('Categoria atualizada');
+  }
+
+  document.getElementById('p_image').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    const prev = document.getElementById('p_preview');
+    if (f) {
+      prev.src = URL.createObjectURL(f);
+      prev.style.display = 'block';
+    } else {
+      prev.style.display = 'none';
+    }
+  });
+
   document.getElementById('product-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const errorEl = document.getElementById('product-error');
     errorEl.textContent = '';
 
-    const payload = {
-      name: document.getElementById('p_name').value,
-      description: document.getElementById('p_description').value,
-      price: document.getElementById('p_price').value,
-      is_customizable: document.getElementById('p_custom').checked
-    };
-
     try {
+      let imageUrl = null;
+      const file = document.getElementById('p_image').files[0];
+      if (file) imageUrl = await uploadImage(file);
+
+      const catVal = document.getElementById('p_category').value;
+      const payload = {
+        name: document.getElementById('p_name').value,
+        description: document.getElementById('p_description').value,
+        price: document.getElementById('p_price').value,
+        is_customizable: document.getElementById('p_custom').checked,
+        category_id: catVal === '' ? null : Number(catVal),
+        image_url: imageUrl
+      };
+
       const res = await fetch(`/api/products/${SLUG}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -181,9 +281,10 @@
       }
       showToast('Produto adicionado');
       document.getElementById('product-form').reset();
+      document.getElementById('p_preview').style.display = 'none';
       loadProducts();
     } catch (err) {
-      errorEl.textContent = 'Erro de conexão';
+      errorEl.textContent = err.message || 'Erro de conexão';
     }
   });
 
@@ -287,7 +388,7 @@
     loadBuilderGroups();
   }
 
-  loadProducts();
+  loadCategories().catch(() => showToast('Erro ao carregar categorias')).finally(loadProducts);
 </script>
 </body>
 </html>
