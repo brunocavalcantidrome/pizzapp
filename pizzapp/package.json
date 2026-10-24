@@ -2,10 +2,10 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "bcrypt": "^5.1.1",
-    "connect-mysql2": "^2.2.6",
     "dotenv": "^17.4.2",
     "ejs": "^6.0.1",
     "express": "^5.2.1",
+    "express-mysql-session": "^3.0.3",
     "express-session": "^1.18.1",
     "htop": "^1.0.1",
     "multer": "^2.4.0",

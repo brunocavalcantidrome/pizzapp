@@ -9,7 +9,7 @@ const multer = require('multer');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const session = require('express-session');
-const MySQLStore = require('connect-mysql2')(session);
+const MySQLStore = require('express-mysql-session')(session);
 const {
   initWhatsApp,
   getStatus: getWhatsAppStatus,
@@ -54,13 +54,22 @@ initWhatsApp(io);
 const PORT = process.env.PORT || 3000;
 
 // Configuração de sessão
-const sessionStore = new MySQLStore({
+const sessionStoreOptions = {
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  createDatabaseTable: false
-});
+  createDatabaseTable: false,
+  schema: {
+    tableName: 'sessions',
+    columnNames: {
+      session_id: 'session_id',
+      expires: 'expires',
+      data: 'data'
+    }
+  }
+};
+const sessionStore = new MySQLStore(sessionStoreOptions);
 
 app.use(session({
   key: 'pizzapp.sid',
