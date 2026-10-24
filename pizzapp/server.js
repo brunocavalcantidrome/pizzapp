@@ -6,6 +6,10 @@ const { Server } = require('socket.io');
 const mysql = require('mysql2/promise');
 const fs = require('fs');
 const multer = require('multer');
+const bcrypt = require('bcrypt');
+const crypto = require('crypto');
+const session = require('express-session');
+const MySQLStore = require('connect-mysql2')(session);
 const {
   initWhatsApp,
   getStatus: getWhatsAppStatus,
@@ -16,7 +20,10 @@ const {
   sendOrderToRestaurant,
   buildCustomerOrderMessage,
   buildCustomerStatusMessage,
-  sendCustomerMessage
+  sendCustomerMessage,
+  setChatPool,
+  getConnectedNumber,
+  getTokenRestaurant
 } = require('./whatsapp');
 
 const app = express();
@@ -44,7 +51,30 @@ io.on('connection', (socket) => {
 // Se falhar (ex: sem Chrome), o servidor segue funcionando sem notificação via WhatsApp.
 initWhatsApp(io);
 
-const PORT = process.env.PORT || 80;
+const PORT = process.env.PORT || 3000;
+
+// Configuração de sessão
+const sessionStore = new MySQLStore({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  createDatabaseTable: false
+});
+
+app.use(session({
+  key: 'pizzapp.sid',
+  secret: process.env.SESSION_SECRET || 'pizzapp-change-me',
+  store: sessionStore,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 1000 * 60 * 60 * 24 * 7
+  }
+}));
 
 // Fábrica de middlewares de autenticação básica (um para o painel do lojista, outro para o admin do sistema)
 function basicAuth(userEnvVar, passEnvVar, realm) {
@@ -72,6 +102,21 @@ const adminAuth = basicAuth('ADMIN_USER', 'ADMIN_PASSWORD', 'Painel Administrati
 // Autentica o admin do sistema (gerencia todos os estabelecimentos)
 const sysAdminAuth = basicAuth('SYSADMIN_USER', 'SYSADMIN_PASSWORD', 'Administração do Sistema');
 
+// Helpers de autenticação por usuários
+async function hashPassword(password) {
+  const salt = await bcrypt.genSalt(10);
+  return bcrypt.hash(password, salt);
+}
+
+async function verifyPassword(password, hash) {
+  if (!hash) return false;
+  return bcrypt.compare(password, hash);
+}
+
+function generateResetToken() {
+  return crypto.randomBytes(48).toString('hex');
+}
+
 // Sons de notificação disponíveis para o painel de pedidos (gerados via Web Audio API no navegador)
 const NOTIFICATION_SOUNDS = [
   'sino-duplo',
@@ -94,13 +139,138 @@ const pool = mysql.createPool({
   queueLimit: 0
 });
 
+// Pool para o bate-papo WhatsApp (persistência + "ring token" das recebidas)
+setChatPool(pool);
+
+async function sendPasswordResetLink({ userId, whatsappTo, restaurantSlug }) {
+  if (!whatsappTo) throw new Error('Usuário sem WhatsApp cadastrado');
+  const digits = normalizeBRPhone(whatsappTo);
+  if (!digits) throw new Error('WhatsApp inválido');
+  const token = generateResetToken();
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24); // 24h
+  await pool.query(
+    `INSERT INTO password_reset_tokens (user_id, token, whatsapp_to, expires_at)
+     VALUES (?, ?, ?, ?)`,
+    [userId, token, digits, expiresAt]
+  );
+  const baseUrl = process.env.APP_BASE_URL || 'https://www.deliverygbi.com.br';
+  const link = `${baseUrl}/auth/set-password?token=${token}`;
+  const msg = `Olá! Você recebeu um link para criar/alterar sua senha no Pizzapp.\n\n${link}\n\nEste link é válido por 24 horas e só pode ser usado uma vez.`;
+  await sendWhatsApp(digits, msg);
+  return { token, link, expiresAt };
+}
+
+// ===== Rotas públicas: criação/alteração de senha via link =====
+app.get('/auth/set-password', async (req, res) => {
+  const token = req.query.token;
+  if (!token) return res.status(400).render('auth/set_password', { error: 'Link inválido.', success: null, token: '', loginUrl: '/sistema/admin', validHours: 24 });
+  try {
+    const [rows] = await pool.query(
+      `SELECT t.id, t.user_id, t.expires_at, t.used_at, u.username, u.role, u.restaurant_id
+       FROM password_reset_tokens t
+       JOIN auth_users u ON u.id = t.user_id
+       WHERE t.token = ?`,
+      [token]
+    );
+    if (rows.length === 0) return res.status(400).render('auth/set_password', { error: 'Link inválido ou já utilizado.', success: null, token: '', loginUrl: '/sistema/admin', validHours: 24 });
+    const t = rows[0];
+    if (t.used_at) return res.status(400).render('auth/set_password', { error: 'Este link já foi utilizado.', success: null, token: '', loginUrl: '/sistema/admin', validHours: 24 });
+    if (new Date(t.expires_at) < new Date()) return res.status(400).render('auth/set_password', { error: 'Este link expirou. Solicite um novo ao administrador.', success: null, token: '', loginUrl: '/sistema/admin', validHours: 24 });
+    const loginUrl = t.role === 'sysadmin' ? '/sistema/admin' : `/${t.restaurant_id ? req.query.r || '' : ''}/admin`;
+    res.render('auth/set_password', { error: null, success: null, token, loginUrl: t.role === 'sysadmin' ? '/sistema/admin' : '/sistema/admin', validHours: 24 });
+  } catch (e) {
+    console.error('Erro ao validar token de senha:', e);
+    res.status(500).render('auth/set_password', { error: 'Erro interno.', success: null, token: '', loginUrl: '/sistema/admin', validHours: 24 });
+  }
+});
+
+app.post('/auth/set-password', async (req, res) => {
+  const { token, password, confirm_password } = req.body;
+  const loginUrl = '/sistema/admin';
+  if (!token) return res.status(400).render('auth/set_password', { error: 'Link inválido.', success: null, token: '', loginUrl, validHours: 24 });
+  if (!password || password.length < 6) return res.status(400).render('auth/set_password', { error: 'A senha deve ter pelo menos 6 caracteres.', success: null, token, loginUrl, validHours: 24 });
+  if (password !== confirm_password) return res.status(400).render('auth/set_password', { error: 'As senhas não conferem.', success: null, token, loginUrl, validHours: 24 });
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query(
+      `SELECT t.id, t.user_id, t.expires_at, t.used_at, u.role
+       FROM password_reset_tokens t
+       JOIN auth_users u ON u.id = t.user_id
+       WHERE t.token = ? FOR UPDATE`,
+      [token]
+    );
+    if (rows.length === 0) { await conn.rollback(); return res.status(400).render('auth/set_password', { error: 'Link inválido ou já utilizado.', success: null, token: '', loginUrl, validHours: 24 }); }
+    const t = rows[0];
+    if (t.used_at) { await conn.rollback(); return res.status(400).render('auth/set_password', { error: 'Este link já foi utilizado.', success: null, token: '', loginUrl, validHours: 24 }); }
+    if (new Date(t.expires_at) < new Date()) { await conn.rollback(); return res.status(400).render('auth/set_password', { error: 'Este link expirou. Solicite um novo ao administrador.', success: null, token: '', loginUrl, validHours: 24 }); }
+    const hash = await hashPassword(password);
+    await conn.query('UPDATE auth_users SET password_hash = ?, must_change_password = 0, updated_at = NOW() WHERE id = ?', [hash, t.user_id]);
+    await conn.query('UPDATE password_reset_tokens SET used_at = NOW() WHERE id = ?', [t.id]);
+    await conn.commit();
+    res.render('auth/set_password', { error: null, success: 'Senha definida com sucesso!', token: '', loginUrl, validHours: 24 });
+  } catch (e) {
+    await conn.rollback();
+    console.error('Erro ao definir senha:', e);
+    res.status(500).render('auth/set_password', { error: 'Erro interno.', success: null, token, loginUrl, validHours: 24 });
+  } finally {
+    conn.release();
+  }
+});
+
+// ===== APIs do Sistema (sysadmin) para gerenciar usuários e resetar senha =====
+app.post('/api/sistema/users', sysAdminAuth, async (req, res) => {
+  try {
+    const { restaurant_id, role = 'admin', username, name, whatsapp, send_link = true } = req.body;
+    if (!username) return res.status(400).json({ error: 'username é obrigatório' });
+    if (role === 'admin' && !restaurant_id) return res.status(400).json({ error: 'restaurant_id é obrigatório para admin' });
+    if (!whatsapp) return res.status(400).json({ error: 'whatsapp é obrigatório para envio do link' });
+    const digits = normalizeBRPhone(whatsapp);
+    if (!digits) return res.status(400).json({ error: 'WhatsApp inválido' });
+    const [exists] = await pool.query('SELECT id FROM auth_users WHERE username = ?', [username]);
+    if (exists.length > 0) return res.status(400).json({ error: 'Usuário já existe' });
+    const [result] = await pool.query(
+      `INSERT INTO auth_users (restaurant_id, role, username, password_hash, whatsapp, name, must_change_password, is_active)
+       VALUES (?, ?, ?, NULL, ?, ?, 1, 1)`,
+      [role === 'sysadmin' ? null : restaurant_id, role, username, digits, name || null]
+    );
+    let linkInfo = null;
+    if (send_link) {
+      try {
+        linkInfo = await sendPasswordResetLink({ userId: result.insertId, whatsappTo: digits });
+      } catch (e) {
+        console.error('Erro ao enviar link:', e.message);
+      }
+    }
+    res.json({ ok: true, user_id: result.insertId, link_sent: !!linkInfo, link: linkInfo?.link });
+  } catch (e) {
+    console.error('Erro ao criar usuário:', e);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+app.post('/api/sistema/users/:id/reset-password', sysAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await pool.query('SELECT id, whatsapp, username FROM auth_users WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Usuário não encontrado' });
+    const user = rows[0];
+    if (!user.whatsapp) return res.status(400).json({ error: 'Usuário sem WhatsApp cadastrado' });
+    const linkInfo = await sendPasswordResetLink({ userId: user.id, whatsappTo: user.whatsapp });
+    res.json({ ok: true, link_sent: true, username: user.username });
+  } catch (e) {
+    console.error('Erro ao resetar senha:', e);
+    res.status(500).json({ error: e.message || 'Erro interno' });
+  }
+});
+
 // Middleware Multi-tenant: Identifica a loja pela URL (:slug)
 async function tenantMiddleware(req, res, next) {
   const { slug } = req.params;
 
   try {
     const [rows] = await pool.query(
-      'SELECT id, name, slug, whatsapp, is_active, notification_sound, logo_url, cover_url FROM restaurants WHERE slug = ?',
+      'SELECT id, name, slug, whatsapp, is_active, notification_sound, logo_url, cover_url, cover_position FROM restaurants WHERE slug = ?',
       [slug]
     );
 
@@ -618,6 +788,94 @@ app.delete('/api/builder/:slug/options/:optionId', adminAuth, tenantMiddleware, 
   }
 });
 
+// ===== Página inicial (vitrine da plataforma) =====
+
+// Home pública: descritivo + carrossel de lojas + formulário p/ lojistas
+app.get('/', async (req, res) => {
+  try {
+    const [stores] = await pool.query(
+      'SELECT name, slug, logo_url FROM restaurants WHERE is_active = TRUE ORDER BY name'
+    );
+    res.render('site/home', { stores });
+  } catch (err) {
+    console.error('Erro ao renderizar home:', err);
+    res.status(500).send('Erro ao carregar página inicial.');
+  }
+});
+
+// Captação de leads (formulário público da home)
+app.post('/api/leads', async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const storeName = String(req.body.store_name || '').trim();
+    const email = String(req.body.email || '').trim() || null;
+    const message = String(req.body.message || '').trim() || null;
+    if (!name) return res.status(400).json({ error: 'Informe seu nome.' });
+    if (!storeName) return res.status(400).json({ error: 'Informe o nome do estabelecimento.' });
+    if (!isValidBRPhone(req.body.phone)) {
+      return res.status(400).json({ error: 'Informe um WhatsApp válido com DDD.' });
+    }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'E-mail inválido.' });
+    }
+    if (message && message.length > 1000) {
+      return res.status(400).json({ error: 'Mensagem muito longa (máx. 1000 caracteres).' });
+    }
+    const [result] = await pool.query(
+      'INSERT INTO leads (name, store_name, phone, email, message) VALUES (?, ?, ?, ?, ?)',
+      [name, storeName, normalizeBRPhone(req.body.phone), email, message]
+    );
+    res.status(201).json({ message: 'Recebido! Entraremos em contato em breve.', lead_id: result.insertId });
+  } catch (err) {
+    console.error('Erro ao salvar lead:', err);
+    res.status(500).json({ error: 'Erro ao enviar. Tente novamente.' });
+  }
+});
+
+// Leads (sistema): lista, troca de status e exclusão
+app.get('/api/sistema/leads', sysAdminAuth, async (req, res) => {
+  try {
+    const [leads] = await pool.query(
+      'SELECT id, name, store_name, phone, email, message, status, created_at FROM leads ORDER BY created_at DESC'
+    );
+    res.json({ total_leads: leads.length, leads });
+  } catch (err) {
+    console.error('Erro ao listar leads:', err);
+    res.status(500).json({ error: 'Erro ao buscar leads.' });
+  }
+});
+
+app.put('/api/sistema/leads/:id', sysAdminAuth, async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!['new', 'contacted', 'done'].includes(status)) {
+      return res.status(400).json({ error: 'Status inválido (new, contacted, done).' });
+    }
+    const [result] = await pool.query('UPDATE leads SET status = ? WHERE id = ?', [status, req.params.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Lead não encontrado.' });
+    res.json({ message: 'Lead atualizado!' });
+  } catch (err) {
+    console.error('Erro ao atualizar lead:', err);
+    res.status(500).json({ error: 'Erro ao atualizar lead.' });
+  }
+});
+
+app.delete('/api/sistema/leads/:id', sysAdminAuth, async (req, res) => {
+  try {
+    const [result] = await pool.query('DELETE FROM leads WHERE id = ?', [req.params.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Lead não encontrado.' });
+    res.json({ message: 'Lead excluído!' });
+  } catch (err) {
+    console.error('Erro ao excluir lead:', err);
+    res.status(500).json({ error: 'Erro ao excluir lead.' });
+  }
+});
+
+// Página (sistema): leads
+app.get('/sistema/admin/leads', sysAdminAuth, (req, res) => {
+  res.render('system/leads');
+});
+
 // ===== Admin do Sistema: gerencia todos os estabelecimentos (multi-tenant) =====
 
 // Rota (sistema) para listar todos os estabelecimentos
@@ -761,6 +1019,12 @@ app.get('/sistema/admin/clientes', sysAdminAuth, (req, res) => {
   res.render('system/customers');
 });
 
+// Página do admin do sistema para o WhatsApp (conexão + todas as conversas).
+// Declarada aqui (antes de /:slug/...) para não ser capturada por /:slug/admin/whatsapp.
+app.get('/sistema/admin/whatsapp', sysAdminAuth, (req, res) => {
+  res.render('system/whatsapp');
+});
+
 // Teste de Saúde / Conexão
 // Precisa vir antes de '/:slug': como esse padrão casa qualquer segmento
 // unico da URL, se ficasse depois o Express tentaria tratar "health"
@@ -818,6 +1082,11 @@ app.get('/:slug/admin/loja', adminAuth, tenantMiddleware, (req, res) => {
 // Rota do painel administrativo: clientes (fidelização)
 app.get('/:slug/admin/clientes', adminAuth, tenantMiddleware, (req, res) => {
   res.render('admin/customers', { restaurant: req.restaurant });
+});
+
+// Rota do painel administrativo: bate-papo WhatsApp da loja
+app.get('/:slug/admin/whatsapp', adminAuth, tenantMiddleware, (req, res) => {
+  res.render('admin/whatsapp', { restaurant: req.restaurant });
 });
 
 // Rota POST para receber o pedido do carrinho (Otimizada e Segura)
@@ -1309,7 +1578,7 @@ app.get('/api/customers/:slug', adminAuth, tenantMiddleware, async (req, res) =>
 // Rota para o lojista atualizar logo e capa da sua loja
 app.put('/api/settings/:slug/profile', adminAuth, tenantMiddleware, async (req, res) => {
   try {
-    const { logo_url, cover_url } = req.body;
+    const { logo_url, cover_url, cover_position } = req.body;
 
     for (const [label, url] of [['logo_url', logo_url], ['cover_url', cover_url]]) {
       if (url !== undefined && url !== null && url !== '') {
@@ -1319,10 +1588,15 @@ app.put('/api/settings/:slug/profile', adminAuth, tenantMiddleware, async (req, 
       }
     }
 
+    if (cover_position !== undefined && !['top', 'center', 'bottom'].includes(cover_position)) {
+      return res.status(400).json({ error: 'Enquadramento inválido (top, center, bottom).' });
+    }
+
     const fields = [];
     const values = [];
     if (logo_url !== undefined) { fields.push('logo_url = ?'); values.push(logo_url || null); }
     if (cover_url !== undefined) { fields.push('cover_url = ?'); values.push(cover_url || null); }
+    if (cover_position !== undefined) { fields.push('cover_position = ?'); values.push(cover_position); }
     if (fields.length === 0) {
       return res.status(400).json({ error: 'Nenhum campo para atualizar foi informado.' });
     }
@@ -1358,6 +1632,431 @@ app.put('/api/settings/:slug/notification-sound', adminAuth, tenantMiddleware, a
   }
 });
 
+// ===== Bate-papo WhatsApp (token permanente + auto-reply + TTL) =====
+// Pertencimento: telefone pertence à loja do ÚLTIMO pedido, sem expiração.
+// Os 120 min valem só para o auto-reply ("com quem estou falando").
+
+// Telefones cujo "token" atual pertence à loja (último pedido é dela)
+async function tokenPhonesForStore(restaurantId) {
+  const [rows] = await pool.query(
+    `SELECT c.phone FROM customers c
+     WHERE c.restaurant_id = ?
+       AND c.last_order_at = (
+         SELECT MAX(c2.last_order_at) FROM customers c2 WHERE c2.phone = c.phone
+       )`,
+    [restaurantId]
+  );
+  return rows.map((r) => r.phone);
+}
+
+function groupThreads(messages) {
+  const map = new Map();
+  for (const m of messages) {
+    const phone = m.direction === 'in' ? m.from_phone : m.to_phone;
+    if (!phone) continue;
+    if (!map.has(phone)) map.set(phone, { phone, last_at: m.created_at, messages: [] });
+    const t = map.get(phone);
+    t.messages.push(m);
+    if (new Date(m.created_at) > new Date(t.last_at)) t.last_at = m.created_at;
+  }
+  return Array.from(map.values())
+    .sort((a, b) => new Date(b.last_at) - new Date(a.last_at))
+    .slice(0, 30)
+    .map((t) => ({ ...t, messages: t.messages.slice(-100) }));
+}
+
+// Nome + último pedido por telefone (cards das conversas).
+// Nome vem do customers (prioriza a loja preferida); pedido casa pelo telefone
+// normalizado (orders.customer_phone é o digitado cru).
+async function enrichThreads(threads, preferStore = new Map()) {
+  if (threads.length === 0) return threads;
+  const phones = threads.map((t) => t.phone);
+  const [custRows] = await pool.query(
+    'SELECT restaurant_id, phone, name FROM customers WHERE phone IN (?)',
+    [phones]
+  );
+  const names = new Map();
+  for (const c of custRows) {
+    const pref = preferStore.get(c.phone);
+    if (pref && c.restaurant_id !== pref && names.has(c.phone)) continue;
+    if (pref && c.restaurant_id === pref) names.set(c.phone, c.name);
+    else if (!names.has(c.phone)) names.set(c.phone, c.name);
+  }
+  const scoped = [...preferStore.values()].filter(Boolean);
+  const onlyStore = scoped.length > 0 && new Set(scoped).size === 1 ? scoped[0] : null;
+  let orderRows;
+  if (onlyStore) {
+    [orderRows] = await pool.query(
+      'SELECT id, customer_phone, created_at FROM orders WHERE restaurant_id = ? ORDER BY id DESC LIMIT 500',
+      [onlyStore]
+    );
+  } else {
+    [orderRows] = await pool.query(
+      'SELECT id, restaurant_id, customer_phone, created_at FROM orders ORDER BY id DESC LIMIT 1000'
+    );
+  }
+  const lastOrders = new Map();
+  for (const o of orderRows) {
+    const digits = normalizeBRPhone(o.customer_phone);
+    if (digits && !lastOrders.has(digits)) lastOrders.set(digits, o);
+  }
+  return threads.map((t) => ({
+    ...t,
+    name: names.get(t.phone) || null,
+    last_order_id: lastOrders.get(t.phone)?.id || null,
+    last_order_at: lastOrders.get(t.phone)?.created_at || null
+  }));
+}
+
+// Conversas da loja (lojista): recebidas do token atual + respostas enviadas por ela
+app.get('/api/chat/:slug/threads', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const phones = await tokenPhonesForStore(req.restaurant.id);
+    let inbound = [];
+    if (phones.length > 0) {
+      [inbound] = await pool.query(
+        `SELECT id, direction, from_phone, to_phone, body, created_at
+         FROM whatsapp_messages
+         WHERE direction = 'in' AND from_phone IN (?)
+         ORDER BY created_at DESC LIMIT 500`,
+        [phones]
+      );
+    }
+    const [outbound] = await pool.query(
+      `SELECT id, direction, from_phone, to_phone, body, created_at
+       FROM whatsapp_messages
+       WHERE direction = 'out' AND restaurant_id = ?
+       ORDER BY created_at DESC LIMIT 200`,
+      [req.restaurant.id]
+    );
+    const threads = groupThreads([...inbound, ...outbound]);
+    const prefer = new Map(threads.map((t) => [t.phone, req.restaurant.id]));
+    res.json({ threads: await enrichThreads(threads, prefer) });
+  } catch (err) {
+    console.error('Erro ao listar conversas:', err);
+    res.status(500).json({ error: 'Erro ao buscar conversas.' });
+  }
+});
+
+// Histórico de um telefone (lojista): exige token atual ou resposta própria anterior
+app.get('/api/chat/:slug/history', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const digits = normalizeBRPhone(req.query.phone);
+    if (!digits) return res.status(400).json({ error: 'Telefone inválido.' });
+    const token = await getTokenRestaurant(pool, digits);
+    const [own] = await pool.query(
+      'SELECT 1 FROM whatsapp_messages WHERE direction = \'out\' AND restaurant_id = ? AND to_phone = ? LIMIT 1',
+      [req.restaurant.id, digits]
+    );
+    if ((!token || token.id !== req.restaurant.id) && own.length === 0) {
+      return res.status(404).json({ error: 'Conversa não pertence a esta loja no momento.' });
+    }
+    const [messages] = await pool.query(
+      `SELECT id, direction, from_phone, to_phone, body, ack, created_at
+       FROM whatsapp_messages
+       WHERE (direction = 'in' AND from_phone = ?) OR (direction = 'out' AND to_phone = ? AND restaurant_id = ?)
+       ORDER BY created_at ASC LIMIT 200`,
+      [digits, digits, req.restaurant.id]
+    );
+    const [[cust]] = await pool.query(
+      'SELECT name FROM customers WHERE phone = ? AND restaurant_id = ? LIMIT 1',
+      [digits, req.restaurant.id]
+    );
+    res.json({ phone: digits, name: cust ? cust.name : null, messages });
+  } catch (err) {
+    console.error('Erro ao buscar histórico:', err);
+    res.status(500).json({ error: 'Erro ao buscar histórico.' });
+  }
+});
+
+// Responder (lojista): só para telefone com token atual nesta loja
+app.post('/api/chat/:slug/send', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const text = String(req.body.body || '').trim();
+    if (!text) return res.status(400).json({ error: 'Mensagem vazia.' });
+    if (text.length > 4000) return res.status(400).json({ error: 'Mensagem muito longa (máx. 4000).' });
+    const digits = normalizeBRPhone(req.body.to_phone);
+    if (!digits) return res.status(400).json({ error: 'Telefone de destino inválido.' });
+    const token = await getTokenRestaurant(pool, digits);
+    if (!token || token.id !== req.restaurant.id) {
+      return res.status(403).json({ error: 'Esta conversa não pertence à loja no momento.' });
+    }
+    let sent = null;
+    try {
+      sent = await sendCustomerMessage({ to: digits, message: text });
+    } catch (sendErr) {
+      return res.status(502).json({ error: 'Falha ao enviar no WhatsApp: ' + sendErr.message });
+    }
+    const waId = sent && sent.id ? (sent.id._serialized || sent.id.id) : null;
+    const initAck = sent && typeof sent.ack === 'number' ? sent.ack : null;
+    const [result] = await pool.query(
+      `INSERT INTO whatsapp_messages
+       (direction, restaurant_id, from_phone, to_phone, body, wa_message_id, ack, created_at, expires_at)
+       VALUES ('out', ?, ?, ?, ?, ?, ?, NOW(), DATE_ADD(NOW(), INTERVAL 90 DAY))`,
+      [req.restaurant.id, getConnectedNumber(), digits, text, waId, initAck]
+    );
+    const payload = {
+      direction: 'out', phone: digits, body: text, created_at: new Date(),
+      id: result.insertId, ack: initAck,
+      store: { id: req.restaurant.id, slug: req.restaurant.slug, name: req.restaurant.name }
+    };
+    io.to(req.params.slug).emit('whatsapp-message', payload);
+    io.emit('whatsapp-message-sys', payload);
+    res.status(201).json({ message: 'Resposta enviada!', id: result.insertId });
+  } catch (err) {
+    console.error('Erro ao responder chat:', err);
+    res.status(500).json({ error: 'Erro ao enviar resposta.' });
+  }
+});
+
+// Não-lidas da loja (sininho + popup): última pendente de cada conversa do token
+app.get('/api/chat/:slug/unread', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const phones = await tokenPhonesForStore(req.restaurant.id);
+    if (phones.length === 0) return res.json({ total: 0, threads: [] });
+    const [rows] = await pool.query(
+      `SELECT from_phone, body, created_at
+       FROM whatsapp_messages
+       WHERE direction = 'in' AND is_read = 0 AND from_phone IN (?)
+       ORDER BY created_at DESC LIMIT 200`,
+      [phones]
+    );
+    const grouped = new Map();
+    for (const r of rows) {
+      if (!grouped.has(r.from_phone)) {
+        grouped.set(r.from_phone, { phone: r.from_phone, last_at: r.created_at, messages: [] });
+      }
+      grouped.get(r.from_phone).messages.push(r);
+    }
+    const threads = Array.from(grouped.values()).sort((a, b) => new Date(b.last_at) - new Date(a.last_at));
+    const prefer = new Map(threads.map((t) => [t.phone, req.restaurant.id]));
+    const enriched = await enrichThreads(threads, prefer);
+    const total = enriched.reduce((n, t) => n + t.messages.length, 0);
+    res.json({
+      total,
+      threads: enriched.map((t) => ({
+        phone: t.phone,
+        name: t.name,
+        last_order_id: t.last_order_id,
+        unread_count: t.messages.length,
+        last_body: t.messages[t.messages.length - 1].body,
+        last_at: t.last_at
+      }))
+    });
+  } catch (err) {
+    console.error('Erro ao buscar não-lidas:', err);
+    res.status(500).json({ error: 'Erro ao buscar não-lidas.' });
+  }
+});
+
+// Marcar conversa como lida (lojista): ao abrir a thread
+app.post('/api/chat/:slug/read', adminAuth, tenantMiddleware, async (req, res) => {
+  try {
+    const digits = normalizeBRPhone(req.body.phone);
+    if (!digits) return res.status(400).json({ error: 'Telefone inválido.' });
+    const token = await getTokenRestaurant(pool, digits);
+    const [own] = await pool.query(
+      'SELECT 1 FROM whatsapp_messages WHERE direction = \'out\' AND restaurant_id = ? AND to_phone = ? LIMIT 1',
+      [req.restaurant.id, digits]
+    );
+    if ((!token || token.id !== req.restaurant.id) && own.length === 0) {
+      return res.status(404).json({ error: 'Conversa não pertence a esta loja no momento.' });
+    }
+    await pool.query(
+      'UPDATE whatsapp_messages SET is_read = 1 WHERE direction = \'in\' AND from_phone = ? AND is_read = 0',
+      [digits]
+    );
+    io.to(req.params.slug).emit('whatsapp-read', { phone: digits });
+    io.emit('whatsapp-read-sys', { phone: digits });
+    res.json({ message: 'Marcada como lida.' });
+  } catch (err) {
+    console.error('Erro ao marcar lida:', err);
+    res.status(500).json({ error: 'Erro ao marcar como lida.' });
+  }
+});
+
+// Marcar conversa como lida (sistema)
+app.post('/api/sistema/chat/read', sysAdminAuth, async (req, res) => {
+  try {
+    const digits = normalizeBRPhone(req.body.phone);
+    if (!digits) return res.status(400).json({ error: 'Telefone inválido.' });
+    await pool.query(
+      'UPDATE whatsapp_messages SET is_read = 1 WHERE direction = \'in\' AND from_phone = ? AND is_read = 0',
+      [digits]
+    );
+    io.emit('whatsapp-read-sys', { phone: digits });
+    res.json({ message: 'Marcada como lida.' });
+  } catch (err) {
+    console.error('Erro ao marcar lida (sistema):', err);
+    res.status(500).json({ error: 'Erro ao marcar como lida.' });
+  }
+});
+
+// Não-lidas global (sininho do sistema): última pendente de cada conversa
+app.get('/api/sistema/chat/unread', sysAdminAuth, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT from_phone, body, created_at
+       FROM whatsapp_messages
+       WHERE direction = 'in' AND is_read = 0
+       ORDER BY created_at DESC LIMIT 200`
+    );
+    const grouped = new Map();
+    for (const r of rows) {
+      if (!grouped.has(r.from_phone)) {
+        grouped.set(r.from_phone, { phone: r.from_phone, last_at: r.created_at, messages: [] });
+      }
+      grouped.get(r.from_phone).messages.push(r);
+    }
+    const threads = Array.from(grouped.values()).sort((a, b) => new Date(b.last_at) - new Date(a.last_at));
+    const tokens = new Map();
+    await Promise.all(threads.map(async (t) => {
+      try { tokens.set(t.phone, await getTokenRestaurant(pool, t.phone)); }
+      catch (e) { tokens.set(t.phone, null); }
+    }));
+    const prefer = new Map();
+    for (const t of threads) {
+      if (tokens.get(t.phone)) prefer.set(t.phone, tokens.get(t.phone).id);
+    }
+    const enriched = await enrichThreads(threads, prefer);
+    const total = enriched.reduce((n, t) => n + t.messages.length, 0);
+    res.json({
+      total,
+      threads: enriched.map((t) => ({
+        phone: t.phone,
+        name: t.name,
+        last_order_id: t.last_order_id,
+        unread_count: t.messages.length,
+        last_body: t.messages[t.messages.length - 1].body,
+        last_at: t.last_at,
+        store: tokens.get(t.phone) ? {
+          id: tokens.get(t.phone).id,
+          slug: tokens.get(t.phone).slug,
+          name: tokens.get(t.phone).name
+        } : null
+      }))
+    });
+  } catch (err) {
+    console.error('Erro ao buscar não-lidas (sistema):', err);
+    res.status(500).json({ error: 'Erro ao buscar não-lidas.' });
+  }
+});
+
+// Todas as conversas (sistema): com loja do token atual ou "sem loja"
+app.get('/api/sistema/chat/threads', sysAdminAuth, async (req, res) => {
+  try {
+    const [messages] = await pool.query(
+      `SELECT id, direction, restaurant_id, from_phone, to_phone, body, created_at
+       FROM whatsapp_messages ORDER BY created_at DESC LIMIT 1000`
+    );
+    const threads = groupThreads(messages);
+    const phones = threads.map((t) => t.phone);
+    const tokens = new Map();
+    await Promise.all(phones.map(async (phone) => {
+      try {
+        tokens.set(phone, await getTokenRestaurant(pool, phone));
+      } catch (e) { tokens.set(phone, null); }
+    }));
+    const prefer = new Map();
+    for (const phone of phones) {
+      if (tokens.get(phone)) prefer.set(phone, tokens.get(phone).id);
+    }
+    const enriched = await enrichThreads(threads, prefer);
+    res.json({
+      threads: enriched.map((t) => ({
+        ...t,
+        store: tokens.get(t.phone) ? {
+          id: tokens.get(t.phone).id,
+          slug: tokens.get(t.phone).slug,
+          name: tokens.get(t.phone).name
+        } : null
+      }))
+    });
+  } catch (err) {
+    console.error('Erro ao listar conversas (sistema):', err);
+    res.status(500).json({ error: 'Erro ao buscar conversas.' });
+  }
+});
+
+// Histórico de um telefone (sistema): tudo, sem filtro de loja
+app.get('/api/sistema/chat/history', sysAdminAuth, async (req, res) => {
+  try {
+    const digits = normalizeBRPhone(req.query.phone);
+    if (!digits) return res.status(400).json({ error: 'Telefone inválido.' });
+    const [messages] = await pool.query(
+      `SELECT id, direction, restaurant_id, from_phone, to_phone, body, ack, created_at
+       FROM whatsapp_messages
+       WHERE from_phone = ? OR to_phone = ?
+       ORDER BY created_at ASC LIMIT 300`,
+      [digits, digits]
+    );
+    const token = await getTokenRestaurant(pool, digits);
+    const [[cust]] = await pool.query(
+      'SELECT name FROM customers WHERE phone = ? ORDER BY last_order_at DESC LIMIT 1',
+      [digits]
+    );
+    res.json({ phone: digits, name: cust ? cust.name : null, messages, store: token });
+  } catch (err) {
+    console.error('Erro ao buscar histórico (sistema):', err);
+    res.status(500).json({ error: 'Erro ao buscar histórico.' });
+  }
+});
+
+// Responder (sistema): qualquer telefone; vincula à loja informada ou do token
+app.post('/api/sistema/chat/send', sysAdminAuth, async (req, res) => {
+  try {
+    const text = String(req.body.body || '').trim();
+    if (!text) return res.status(400).json({ error: 'Mensagem vazia.' });
+    if (text.length > 4000) return res.status(400).json({ error: 'Mensagem muito longa (máx. 4000).' });
+    const digits = normalizeBRPhone(req.body.to_phone);
+    if (!digits) return res.status(400).json({ error: 'Telefone de destino inválido.' });
+    let restaurantId = req.body.restaurant_id || null;
+    if (!restaurantId) {
+      const token = await getTokenRestaurant(pool, digits);
+      if (token) restaurantId = token.id;
+    }
+    let sent = null;
+    try {
+      sent = await sendCustomerMessage({ to: digits, message: text });
+    } catch (sendErr) {
+      return res.status(502).json({ error: 'Falha ao enviar no WhatsApp: ' + sendErr.message });
+    }
+    const waId = sent && sent.id ? (sent.id._serialized || sent.id.id) : null;
+    const initAck = sent && typeof sent.ack === 'number' ? sent.ack : null;
+    const [result] = await pool.query(
+      `INSERT INTO whatsapp_messages
+       (direction, restaurant_id, from_phone, to_phone, body, wa_message_id, ack, created_at, expires_at)
+       VALUES ('out', ?, ?, ?, ?, ?, ?, NOW(), DATE_ADD(NOW(), INTERVAL 90 DAY))`,
+      [restaurantId, getConnectedNumber(), digits, text, waId, initAck]
+    );
+    const payload = { direction: 'out', phone: digits, body: text, created_at: new Date(), id: result.insertId, ack: initAck, store: null };
+    if (restaurantId) {
+      const [[r]] = await pool.query('SELECT id, slug, name FROM restaurants WHERE id = ?', [restaurantId]);
+      if (r) {
+        payload.store = { id: r.id, slug: r.slug, name: r.name };
+        io.to(r.slug).emit('whatsapp-message', payload);
+      }
+    }
+    io.emit('whatsapp-message-sys', payload);
+    res.status(201).json({ message: 'Resposta enviada!', id: result.insertId });
+  } catch (err) {
+    console.error('Erro ao responder chat (sistema):', err);
+    res.status(500).json({ error: 'Erro ao enviar resposta.' });
+  }
+});
+
+// Expiração das mensagens (TTL de 90 dias): poda a cada hora + ao subir
+async function pruneExpiredMessages() {
+  try {
+    const [result] = await pool.query('DELETE FROM whatsapp_messages WHERE expires_at < NOW()');
+    if (result.affectedRows > 0) console.log(`Chat: ${result.affectedRows} mensagem(ns) expirada(s) removida(s).`);
+  } catch (err) {
+    console.error('Erro na poda de mensagens expiradas:', err.message);
+  }
+}
+pruneExpiredMessages();
+setInterval(pruneExpiredMessages, 60 * 60 * 1000);
+
 // ===== WhatsApp (conta única, gerenciada só pelo admin do sistema) =====
 
 // Status da conexão (conta única que atende todas as lojas)
@@ -1372,11 +2071,6 @@ app.get('/api/sistema/whatsapp/qr', sysAdminAuth, (req, res) => {
     return res.status(404).json({ error: 'Nenhum QR disponível. Já conectado ou ainda inicializando.' });
   }
   res.json({ qr });
-});
-
-// Página do admin do sistema para conectar o WhatsApp (escaneia o QR uma única vez)
-app.get('/sistema/admin/whatsapp', sysAdminAuth, (req, res) => {
-  res.render('system/whatsapp');
 });
 
 server.listen(PORT, '0.0.0.0', () => {
