@@ -1,0 +1,485 @@
+const path = require('path');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcodeTerminal = require('qrcode-terminal');
+
+let client = null;
+let isReady = false;
+let lastQR = null;
+let lastQRAt = null;
+let connectedNumber = null;
+let chatPool = null;
+
+// "Ring token" PERMANENTE: o cliente pertence à loja do último pedido, sem expiração.
+// Os 120 min valem só para o auto-reply (reapresentação), não para o pertencimento.
+const AUTO_REPLY_COOLDOWN_MINUTES = 120;
+// Tempo de vida da mensagem no banco (limpeza periódica no server.js).
+const CHAT_TTL_DAYS = 90;
+
+function initWhatsApp(io) {
+  if (client) return client;
+
+  client = new Client({
+    // Caminho absoluto: com PM2 o cwd pode variar, relativo quebraria a sessão
+    authStrategy: new LocalAuth({ dataPath: path.join(__dirname, '.wwebjs_auth') }),
+    puppeteer: {
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    }
+  });
+
+  client.on('qr', (qr) => {
+    lastQR = qr;
+    lastQRAt = new Date();
+    isReady = false;
+    console.log('📱 WhatsApp: escaneie o QR Code abaixo para conectar:');
+    qrcodeTerminal.generate(qr, { small: true });
+    if (io) io.emit('whatsapp-qr', { qr, at: lastQRAt });
+  });
+
+  client.on('ready', () => {
+    isReady = true;
+    lastQR = null;
+    connectedNumber = client.info ? `${client.info.wid.user}` : null;
+    console.log(`✅ WhatsApp conectado${connectedNumber ? `: +${connectedNumber}` : ''}`);
+    if (io) io.emit('whatsapp-ready', { number: connectedNumber });
+  });
+
+  client.on('authenticated', () => {
+    console.log('🔐 WhatsApp autenticado.');
+  });
+
+  client.on('auth_failure', (msg) => {
+    console.error('❌ Falha de autenticação WhatsApp:', msg);
+  });
+
+  client.on('disconnected', (reason) => {
+    isReady = false;
+    connectedNumber = null;
+    console.warn('⚠️ WhatsApp desconectado:', reason);
+    if (io) io.emit('whatsapp-disconnected', { reason });
+  });
+
+  // Mensagens recebidas (bate-papo): persiste + roteia para a sala da loja dona
+  // do "token" atual do telefone. Sem token -> só o admin do sistema vê.
+  client.on('message', (msg) => {
+    handleIncomingMessage(msg, io).catch((err) =>
+      console.error('Erro ao processar mensagem recebida:', err.message)
+    );
+  });
+
+  // Recibos das enviadas (✓ enviada, ✓✓ entregue, ✓✓ azul lida)
+  client.on('message_ack', (msg, ack) => {
+    handleMessageAck(msg, ack, io).catch((err) =>
+      console.error('Erro ao processar recibo:', err.message)
+    );
+  });
+
+  client.initialize().catch((err) => {
+    console.error('❌ Erro ao inicializar WhatsApp (pedidos seguem funcionando sem ele):', err.message);
+  });
+
+  return client;
+}
+
+function getStatus() {
+  return {
+    connected: isReady,
+    number: connectedNumber,
+    hasQR: !!lastQR,
+    qrAt: lastQRAt
+  };
+}
+
+function getLastQR() {
+  return lastQR;
+}
+
+// Pool do banco para o bate-papo (definido pelo server.js após criar o pool).
+function setChatPool(pool) {
+  chatPool = pool;
+}
+
+function getConnectedNumber() {
+  return connectedNumber;
+}
+
+// "Ring token": loja do pedido mais recente do telefone (sem expiração).
+// Retorna { id, slug, name } ou null (nunca pediu -> só o sistema vê).
+async function getTokenRestaurant(pool, digits) {
+  if (!pool || !digits) return null;
+  const [rows] = await pool.query(
+    `SELECT c.restaurant_id AS id, r.slug, r.name
+     FROM customers c JOIN restaurants r ON r.id = c.restaurant_id
+     WHERE c.phone = ?
+     ORDER BY c.last_order_at DESC LIMIT 1`,
+    [digits]
+  );
+  return rows[0] || null;
+}
+
+function mediaLabel(type) {
+  const map = {
+    image: 'foto', video: 'vídeo', audio: 'áudio', ptt: 'áudio',
+    document: 'arquivo', sticker: 'figurinha', location: 'localização',
+    vcard: 'contato', call_log: 'chamada'
+  };
+  return map[type] || 'mídia';
+}
+
+async function handleIncomingMessage(msg, io) {
+  if (!msg || msg.fromMe) return;
+  // Ignora grupos e canais (só conversa direta 1:1 entra no bate-papo das lojas)
+  if (typeof msg.from === 'string' && (msg.from.endsWith('@g.us') || msg.from.endsWith('@broadcast'))) return;
+
+  const digits = await resolveSenderPhone(msg);
+  if (!digits) return;
+
+  // v1: só texto. Mídia vira placeholder (baixa/visualiza numa próxima versão).
+  const body = (msg.type === 'chat' && msg.body)
+    ? String(msg.body).slice(0, 4000)
+    : `[${mediaLabel(msg.type)}]`;
+  const waId = msg.id ? (msg.id._serialized || msg.id.id || null) : null;
+  const ts = msg.timestamp || Math.floor(Date.now() / 1000);
+
+  if (chatPool) {
+    try {
+      await chatPool.query(
+        `INSERT IGNORE INTO whatsapp_messages
+         (direction, from_phone, to_phone, body, wa_message_id, created_at, expires_at)
+         VALUES ('in', ?, ?, ?, ?, FROM_UNIXTIME(?), DATE_ADD(FROM_UNIXTIME(?), INTERVAL ? DAY))`,
+        [digits, connectedNumber, body, waId, ts, ts, CHAT_TTL_DAYS]
+      );
+    } catch (e) {
+      console.error('Erro ao salvar mensagem recebida:', e.message);
+    }
+  }
+
+  let token = null;
+  try {
+    token = await getTokenRestaurant(chatPool, digits);
+  } catch (e) {
+    console.error('Erro ao resolver loja da mensagem:', e.message);
+  }
+
+  const payload = {
+    direction: 'in',
+    phone: digits,
+    body,
+    created_at: new Date(ts * 1000),
+    store: token ? { id: token.id, slug: token.slug, name: token.name } : null
+  };
+  if (io) {
+    if (token) io.to(token.slug).emit('whatsapp-message', payload);
+    io.emit('whatsapp-message-sys', payload);
+  }
+
+  // Auto-reply de apresentação em nome da loja (um por ciclo de 120min/loja)
+  if (token) {
+    try {
+      await maybeSendAutoReply({ digits, token, io });
+    } catch (e) {
+      console.error('Erro no auto-reply:', e.message);
+    }
+  }
+}
+
+// Apresenta a loja ao cliente ("recebemos sua mensagem...").
+// Dispara se: primeira vez, token mudou de loja, ou último auto há +120 min.
+// Reserva o carimbo antes de enviar (evita duplicar em mensagens simultâneas);
+// se o envio falhar, devolve o carimbo anterior para tentar na próxima.
+async function maybeSendAutoReply({ digits, token, io }) {
+  if (!client || !isReady || !chatPool) return;
+  const [rows] = await chatPool.query(
+    'SELECT last_sent_at FROM wa_auto_replies WHERE phone = ? AND restaurant_id = ?',
+    [digits, token.id]
+  );
+  const prev = rows[0] ? new Date(rows[0].last_sent_at) : null;
+  if (prev && Date.now() - prev.getTime() < AUTO_REPLY_COOLDOWN_MINUTES * 60 * 1000) return;
+
+  if (rows[0]) {
+    await chatPool.query(
+      'UPDATE wa_auto_replies SET last_sent_at = NOW() WHERE phone = ? AND restaurant_id = ?',
+      [digits, token.id]
+    );
+  } else {
+    await chatPool.query(
+      'INSERT IGNORE INTO wa_auto_replies (phone, restaurant_id, last_sent_at) VALUES (?, ?, NOW())',
+      [digits, token.id]
+    );
+  }
+
+  const text = `O estabelecimento *${token.name}* recebeu sua mensagem e irá responder assim que possível.`;
+  try {
+    const chatId = await resolveChatId(digits);
+    const sent = await client.sendMessage(chatId, text);
+    const waId = sent && sent.id ? (sent.id._serialized || sent.id.id) : null;
+    const initAck = sent && typeof sent.ack === 'number' ? sent.ack : null;
+    await chatPool.query(
+      `INSERT INTO whatsapp_messages
+       (direction, restaurant_id, from_phone, to_phone, body, wa_message_id, ack, created_at, expires_at)
+       VALUES ('out', ?, ?, ?, ?, ?, ?, NOW(), DATE_ADD(NOW(), INTERVAL ? DAY))`,
+      [token.id, connectedNumber, digits, text, waId, initAck, CHAT_TTL_DAYS]
+    );
+  } catch (e) {
+    // Envio falhou: devolve o carimbo para tentar na próxima mensagem
+    try {
+      if (prev) {
+        await chatPool.query(
+          'UPDATE wa_auto_replies SET last_sent_at = ? WHERE phone = ? AND restaurant_id = ?',
+          [prev, digits, token.id]
+        );
+      } else {
+        await chatPool.query(
+          'DELETE FROM wa_auto_replies WHERE phone = ? AND restaurant_id = ?',
+          [digits, token.id]
+        );
+      }
+    } catch (rbErr) {
+      console.error('Erro ao devolver carimbo do auto-reply:', rbErr.message);
+    }
+    throw e;
+  }
+
+  const payload = {
+    direction: 'out',
+    phone: digits,
+    body: text,
+    created_at: new Date(),
+    store: { id: token.id, slug: token.slug, name: token.name }
+  };
+  if (io) {
+    io.to(token.slug).emit('whatsapp-message', payload);
+    io.emit('whatsapp-message-sys', payload);
+  }
+}
+
+// Recibo de mensagem enviada: atualiza ack e avisa os painéis p/ pintar os checks
+async function handleMessageAck(msg, ack, io) {
+  try {
+    const waId = msg && msg.id ? (msg.id._serialized || msg.id.id) : null;
+    if (!waId || !chatPool) return;
+    const [rows] = await chatPool.query(
+      'SELECT id, restaurant_id, to_phone FROM whatsapp_messages WHERE wa_message_id = ? AND direction = \'out\' LIMIT 1',
+      [waId]
+    );
+    if (!rows[0]) return;
+    await chatPool.query('UPDATE whatsapp_messages SET ack = ? WHERE id = ?', [ack, rows[0].id]);
+    const payload = { wa_id: waId, ack, phone: rows[0].to_phone, message_id: rows[0].id };
+    if (rows[0].restaurant_id && io) {
+      try {
+        const [rr] = await chatPool.query('SELECT slug FROM restaurants WHERE id = ?', [rows[0].restaurant_id]);
+        if (rr[0]) io.to(rr[0].slug).emit('whatsapp-ack', payload);
+      } catch (e) { /* sem sala, segue p/ sys */ }
+    }
+    if (io) io.emit('whatsapp-ack-sys', payload);
+  } catch (e) {
+    console.error('Erro ao salvar recibo:', e.message);
+  }
+}
+
+// Normaliza "5571987301606", "(71) 98730-1606" etc -> "5571987301606"
+function phoneDigits(phone) {
+  let digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length > 11 && digits.startsWith('55')) digits = digits.slice(2);
+  return digits;
+}
+
+function isValidBRPhone(phone) {
+  const d = phoneDigits(phone);
+  return d.length === 10 || d.length === 11;
+}
+
+function normalizeBRPhone(phone) {
+  if (!phone) return null;
+  let digits = String(phone).replace(/\D/g, '');
+  if (!digits) return null;
+  // Se veio sem DDI (10 ou 11 dígitos), assume Brasil
+  if (digits.length <= 11) digits = '55' + digits;
+  return digits;
+}
+
+function formatMoney(v) {
+  return 'R$ ' + Number(v).toFixed(2);
+}
+
+function buildOrderMessage({ orderId, restaurantName, customer, items, total }) {
+  const lines = [];
+  lines.push(`🍕 *Novo pedido #${orderId} - ${restaurantName}*`);
+  lines.push('');
+  lines.push(`👤 *Cliente:* ${customer.name}`);
+  lines.push(`📞 *Telefone:* ${customer.phone}`);
+  lines.push(`📍 *Endereço:* ${customer.address}`);
+  lines.push(`💳 *Pagamento:* ${customer.payment}`);
+  lines.push('');
+  lines.push(`🧾 *Itens:*`);
+  for (const it of items) {
+    lines.push(`• ${it.quantity}x ${it.name} — ${formatMoney(it.subtotal)} (${formatMoney(it.unit_price)} un.)`);
+    for (const opt of it.selected_options || []) {
+      const extra = Number(opt.extra_price) > 0 ? ` (+${formatMoney(opt.extra_price)})` : '';
+      lines.push(`   └ ${opt.group_name}: ${opt.option_name}${extra}`);
+    }
+  }
+  lines.push('');
+  lines.push(`💰 *Total: ${formatMoney(total)}*`);
+  return lines.join('\n');
+}
+
+const CUSTOMER_STATUS_TEXT = {
+  pending: 'Analisando pedido',
+  preparing: 'Em preparo',
+  shipped: 'Saiu para entrega',
+  delivered: 'Entregue',
+  cancelled: 'Cancelado'
+};
+
+const CUSTOMER_STATUS_EMOJI = {
+  pending: '🔍',
+  preparing: '👨‍🍳',
+  shipped: '🛵',
+  delivered: '✅',
+  cancelled: '❌'
+};
+
+function buildCustomerOrderMessage({ orderId, restaurantName, customerName, items, total, payment }) {
+  const firstName = String(customerName || '').split(' ')[0] || 'cliente';
+  const lines = [];
+  lines.push(`🍕 *${restaurantName}*`);
+  lines.push(`Olá, ${firstName}! Seu pedido *#${orderId}* foi recebido.`);
+  lines.push(`🔍 *Status: analisando pedido* — o restaurante já foi avisado.`);
+  lines.push('');
+  lines.push(`🧾 *Resumo:*`);
+  for (const it of items) {
+    lines.push(`• ${it.quantity}x ${it.name} — ${formatMoney(it.subtotal)}`);
+    for (const opt of it.selected_options || []) {
+      lines.push(`   └ ${opt.option_name}`);
+    }
+  }
+  lines.push('');
+  lines.push(`💰 *Total: ${formatMoney(total)}* (${payment})`);
+  lines.push('');
+  lines.push(`Avisaremos aqui a cada atualização. Obrigado! 🙏`);
+  return lines.join('\n');
+}
+
+function buildCustomerStatusMessage({ orderId, restaurantName, status, total }) {
+  const label = CUSTOMER_STATUS_TEXT[status] || status;
+  const emoji = CUSTOMER_STATUS_EMOJI[status] || '📦';
+  const lines = [];
+  lines.push(`🍕 *${restaurantName} — pedido #${orderId}*`);
+  lines.push(`${emoji} *Status atualizado: ${label}*`);
+  if (status === 'pending') lines.push(`O restaurante está analisando seu pedido.`);
+  if (status === 'preparing') lines.push(`O restaurante já está preparando seu pedido.`);
+  if (status === 'shipped') lines.push(`Seu pedido saiu para entrega. Fique atento!`);
+  if (status === 'delivered') lines.push(`Pedido entregue. Bom apetite! 😋`);
+  if (status === 'cancelled') lines.push(`Seu pedido foi cancelado. Fale com o restaurante em caso de dúvida.`);
+  if (total !== undefined) lines.push(`💰 Total: ${formatMoney(total)}`);
+  return lines.join('\n');
+}
+
+function maskDigits(digits) {
+  const d = String(digits || '');
+  if (d.length <= 6) return '****';
+  return d.slice(0, 4) + '****' + d.slice(-2);
+}
+
+async function resolveChatId(digits) {
+  // Resolve o endereço real da conta dentro da página: o WhatsApp migrou parte
+  // das contas para LID e o envio para @c.us falha com "No LID for user".
+  // (Usa evaluate próprio porque o objeto Wid perde o _serialized ao cruzar
+  // a ponte do puppeteer; aqui retornamos a string pronta.)
+  const fallback = `${digits}@c.us`;
+  try {
+    const serialized = await client.pupPage.evaluate(async (number) => {
+      const wid = window.require('WAWebWidFactory').createWid(number);
+      const result = await window.require('WAWebQueryExistsJob').queryWidExists(wid);
+      if (!result || !result.wid) return null;
+      return result.wid.toString();
+    }, fallback);
+    if (serialized) {
+      console.log(`WhatsApp: ${maskDigits(digits)} resolvido como ${serialized.split('@')[1] === 'lid' ? maskDigits(serialized) : serialized}`);
+      // Aprende o par LID -> telefone para identificar as recebidas desse contato
+      if (serialized.endsWith('@lid')) {
+        saveLidMap(serialized, digits).catch(() => {});
+      }
+      return serialized;
+    }
+    console.warn(`WhatsApp: ${maskDigits(digits)} não registrado, usando @c.us`);
+  } catch (e) {
+    console.warn(`WhatsApp: falha ao resolver ${maskDigits(digits)}, usando @c.us:`, e.message);
+  }
+  return fallback;
+}
+
+// Guarda o par LID -> telefone (usado para identificar remetentes @lid)
+async function saveLidMap(lid, digits) {
+  if (!chatPool || !lid || !digits) return;
+  await chatPool.query(
+    'INSERT INTO wa_lid_map (lid, phone) VALUES (?, ?) ON DUPLICATE KEY UPDATE phone = VALUES(phone)',
+    [lid, digits]
+  );
+}
+
+// Telefone a partir do remetente: @c.us usa o próprio número; @lid consulta o mapa
+// aprendido nos envios (fallback: contato do WhatsApp).
+async function resolveSenderPhone(msg) {
+  const senderRaw = String(msg.from || '');
+  if (senderRaw.endsWith('@lid') && chatPool) {
+    try {
+      const [rows] = await chatPool.query('SELECT phone FROM wa_lid_map WHERE lid = ?', [senderRaw]);
+      if (rows[0] && rows[0].phone) return normalizeBRPhone(rows[0].phone);
+    } catch (e) {
+      console.error('Erro ao consultar mapa LID:', e.message);
+    }
+  }
+  try {
+    const contact = await msg.getContact();
+    const raw = (contact && contact.number) || senderRaw.split('@')[0];
+    const digits = normalizeBRPhone(raw);
+    // Aprendeu pelo contato: registra para as próximas
+    if (digits && senderRaw.endsWith('@lid')) {
+      saveLidMap(senderRaw, digits).catch(() => {});
+    }
+    return digits;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function sendWhatsApp(to, message) {
+  if (!client || !isReady) {
+    throw new Error('WhatsApp não conectado. Conecte em /sistema/admin/whatsapp.');
+  }
+  const digits = normalizeBRPhone(to);
+  if (!digits) throw new Error(`Número de WhatsApp inválido: "${to}"`);
+  const chatId = await resolveChatId(digits);
+  const sent = await client.sendMessage(chatId, message);
+  console.log(`WhatsApp: mensagem enviada para ${maskDigits(digits)} (pedido via chat ${chatId.includes('@lid') ? 'LID' : '@c.us'})`);
+  return sent;
+}
+
+async function sendOrderToRestaurant({ to, message }) {
+  return sendWhatsApp(to, message);
+}
+
+async function sendCustomerMessage({ to, message }) {
+  return sendWhatsApp(to, message);
+}
+
+module.exports = {
+  initWhatsApp,
+  getStatus,
+  getLastQR,
+  normalizeBRPhone,
+  isValidBRPhone,
+  buildOrderMessage,
+  sendOrderToRestaurant,
+  CUSTOMER_STATUS_TEXT,
+  buildCustomerOrderMessage,
+  buildCustomerStatusMessage,
+  sendCustomerMessage,
+  setChatPool,
+  getConnectedNumber,
+  getTokenRestaurant,
+  AUTO_REPLY_COOLDOWN_MINUTES,
+  CHAT_TTL_DAYS
+};
